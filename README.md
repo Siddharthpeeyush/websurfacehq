@@ -106,7 +106,7 @@ curl http://localhost:8000/live     # expect 200 (lightweight, for load balancer
 ## Commands
 
 | Command | Where | Purpose |
-|---|---|
+|---|---|---|
 | `npm run dev` / `npm run build` / `npm run lint` | `apps/web` | Dev server / production build / lint |
 | `uvicorn app.main:app --reload` | `apps/api` | API dev server |
 | `celery -A app.workers.celery_app worker --loglevel=info` | `apps/api` | Celery worker (Week 1 — does not exist yet) |
