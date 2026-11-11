@@ -4,6 +4,7 @@ no mocks.
 """
 
 import uuid
+from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Isolate /health from the environment (review fix F-M1).
 
     ``/health`` reads the database component through the module

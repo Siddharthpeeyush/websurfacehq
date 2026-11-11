@@ -10,6 +10,7 @@ the scan queued instead of failing creation).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Generator
 from uuid import UUID
 
 import pytest
@@ -26,7 +27,7 @@ USER_B = User(id=TENANT_B_USER_ID, email="b@example.com")
 
 
 @pytest.fixture(autouse=True)
-def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Same isolation as tests/test_health.py (review fix F-M1).
 
     ``test_health_payload_shape`` asserts ``database.status == "ok"``
