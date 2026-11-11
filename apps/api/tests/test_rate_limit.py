@@ -55,9 +55,15 @@ def test_memory_window_expiry_allows_again() -> None:
 def test_memory_prunes_stale_keys() -> None:
     # M6 review fix: the in-memory dict must not grow unboundedly. With
     # more than 10,000 fully-stale keys, the next check sweeps them out.
+    # NOTE (CI run #6 fix): every seeded entry must hold only genuinely
+    # stale timestamps. The old fixture used [stale, 1]; the literal 1
+    # is only "stale" when time.monotonic() > 901, so on a fresh CI
+    # runner (monotonic < 901s) it counted as in-window and nothing was
+    # pruned (10002 keys remained). [stale, stale] is stale on any clock.
+    # The assertion below is unchanged.
     limiter = RateLimiter(max_attempts=5, window_seconds=900)
     stale = time.monotonic() - 10_000
-    limiter._attempts = {f"login:ip:10.0.0.{i}": [stale, 1] for i in range(10_001)}
+    limiter._attempts = {f"login:ip:10.0.0.{i}": [stale, stale] for i in range(10_001)}
     assert limiter.check("login:ip:9.9.9.9")[0] is True
     assert len(limiter._attempts) <= 2
 

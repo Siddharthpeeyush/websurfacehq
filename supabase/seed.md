@@ -15,9 +15,11 @@ Row ids are deterministic: tenant A rows are
 `a0000000-0000-4000-8000-0000000000xx`, tenant B rows
 `b0000000-0000-4000-8000-0000000000xx` (see the header comment in
 `seed.sql` for the `xx` mapping). The verification-token and API-key
-columns hold **SHA-256 hashes only** — the raw seed secrets are listed
-in the `seed.sql` header so the hash can be re-derived, and are never
-stored anywhere else.
+columns hold **SHA-256 hashes only**. The two verification-token raw
+values are literal test strings documented in
+`apps/api/app/db/memory.py` (test-only fixtures, never real tokens);
+the two API-key raw values are NOT recorded anywhere in the repo.
+Only the hashes are stored, in the INSERT VALUES below.
 
 ## Step 1 — Create the two auth users FIRST
 

@@ -34,7 +34,7 @@ from app.core.config import settings
 from app.core.errors import ApiError
 from app.main import create_app
 
-TEST_SECRET = "test-jwt-secret-for-websurfacehq-week1"
+TEST_SECRET = "test only, not a real secret, do not use"
 USER_EMAIL = "user@example.com"
 USER_PASSWORD = "correct-horse-battery"
 

@@ -11,7 +11,7 @@ packages the Phase 0 note promised.
 | pydantic==2.14.3 | Data validation for request/response models and settings (FastAPI's base). |
 | pydantic-settings==2.16.2 | Loads settings from environment variables with fail-fast validation. |
 | httpx==0.28.1 | Async HTTP client for future outbound calls; also the transport `TestClient` needs. |
-| PyJWT==2.10.1 | HS256 verification of Supabase JWTs in `app/auth/jwt.py` (Week 1). |
+| PyJWT==2.15.0 | HS256 verification of Supabase JWTs in `app/auth/jwt.py` (Week 1). Bumped 2.10.1 → 2.15.0 on 11 Nov 2026: pip-audit found 22 known vulns in 2.10.1 (incl. GHSA-pxh4-856f-4h89, HMAC key validation); 2.15.0 is the first version clearing all of them. Drop-in for our usage — `jwt.decode(..., algorithms=["HS256"])` / `jwt.PyJWTError` in 2.11–2.15 — no breaking change for our usage. |
 | supabase==2.18.0 | Supabase-py: GoTrue Auth (signup/login/reset/PKCE) + PostgREST store (Week 1). |
 | gotrue==2.12.3 | Direct import in `app/auth/provider.py` (`gotrue.errors.AuthApiError`) — a direct dependency, not a transitive one (L8 review fix). |
 | redis==5.2.1 | redis-py: rate-limit backend + Celery broker/backend + DLQ/vuln locks (Week 1). |

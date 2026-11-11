@@ -44,10 +44,10 @@
 -- are deliberately NOT printed anywhere in this repo (L9 review fix):
 -- only the hashes below are recorded, so a reader of the seed can
 -- verify a hash without learning a usable token or key:
---   tenant A token hash: 53bc23399c6f109e6aa1bddccc5050da0bb6b52196dfe02818694789f1a9d630
---   tenant A api key hash: fa2553798ad2f1bb0f8d55e30e84136914d6a75a3abdcfdacc65e1f98156b1a2
---   tenant B token hash: 270e6f10d186d9ad242b380e206072429c52bd4226d984e758248147e448aeed
---   tenant B api key hash: 7d507171339642b6e07244a464257ce76d22e0bac355dcc20a5447b32667d03e
+--   tenant A token hash: see the INSERT VALUES below (canonical copy)
+--   tenant A api key hash: see the INSERT VALUES below (canonical copy)
+--   tenant B token hash: see the INSERT VALUES below (canonical copy)
+--   tenant B api key hash: see the INSERT VALUES below (canonical copy)
 
 BEGIN;
 
