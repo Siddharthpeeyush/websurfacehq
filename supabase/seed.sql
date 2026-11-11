@@ -32,8 +32,11 @@
 -- MUST be created first via the Supabase dashboard (Authentication
 -- > Users > Add user) or the Auth Admin API, with EXACTLY the UUIDs
 -- above — otherwise every INSERT below fails on the auth.users FK.
--- Until the Supabase project exists this seed is UNAPPLIED; do not
--- invent a project URL or keys to "apply" it. See supabase/seed.md.
+-- APPLIED live 11 Nov 2026: migrations 0001–0004 + seed applied via
+-- the dashboard SQL editor; all 13 tables exist; row counts verified
+-- (targets 2, scans 2, assets 4, findings 4, scan_jobs 2, audit_logs 2,
+-- subscriptions 2, teams 1, team_members 1, api_keys 2, notifications 2,
+-- support_tickets 2, attack_paths 2). See supabase/seed.md.
 --
 -- Apply as a role that bypasses RLS (postgres / service_role via
 -- psql), AFTER `supabase db push` (0001 -> 0002 -> 0003):

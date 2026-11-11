@@ -62,5 +62,8 @@ Sign in as tenant A and confirm:
    (which has no `user_id` of its own — tenancy flows through its scan).
 4. Repeat mirrored as tenant B.
 
-**Status: UNAPPLIED.** No Supabase project exists yet (owner creates
-it in the dashboard, Week 1). Do not invent a project URL or keys.
+**Status: APPLIED live 11 Nov 2026** — migrations 0001–0004 + seed
+applied via the dashboard SQL editor; all 13 tables exist; row counts
+verified (targets 2, scans 2, assets 4, findings 4, scan_jobs 2,
+audit_logs 2, subscriptions 2, teams 1, team_members 1, api_keys 2,
+notifications 2, support_tickets 2, attack_paths 2).
