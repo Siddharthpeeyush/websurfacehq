@@ -1,0 +1,49 @@
+# WebSurfaceHQ .gitignore
+# Generated output must never be committed — in particular, build output must
+# never trip the CI secrets job. (11 Nov 2026: gitleaks flagged 3 findings in
+# apps/web/.next/ build output — per-build ephemeral encryption/signing keys
+# (previewModeEncryptionKey, previewModeSigningKey, encryptionKey), rotated
+# every build. Not long-lived credentials and worthless without a running app
+# (no preview mode, no Server Actions exist), but they ARE real keys, not
+# "hashes" — never commit them. The fix is this file, NOT a gitleaks
+# allowlist entry.)
+
+# --- Env files: ignore everything except .env.example -----------------------
+.env*
+!.env.example
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# --- Go ---------------------------------------------------------------------
+/packages/scanner-agent/scanner-agent
+*.test
+
+# --- OS / IDE ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Misc -------------------------------------------------------------------
+*.log
+coverage/
