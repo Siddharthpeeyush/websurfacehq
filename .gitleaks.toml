@@ -1,0 +1,30 @@
+# WebSurfaceHQ gitleaks config.
+#
+# Extends the default gitleaks rule set — detection of real secrets is NOT
+# weakened. The allowlist below is scoped to `.env.example` ONLY (via `paths`)
+# and only suppresses the documented placeholder values used there, so CI
+# does not false-positive on them. Patterns are anchored: a value must start
+# with `change-me` or exactly equal a documented placeholder URL. Any value
+# that does not match these placeholder patterns is still scanned by the
+# full default rules, and any file other than `.env.example` is fully scanned.
+#
+# If a new placeholder pattern is added to .env.example, add its regex here
+# (and only here) — never add a real credential, even a test one.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholder values from .env.example — not real secrets"
+paths = [
+  '''\.env\.example$''',
+]
+regexes = [
+  '''^change-me''',
+  '''^https://your-project\.supabase\.co$''',
+  '''^https://your-domain\.example\.com$''',
+  '''^https://your-api\.onrender\.com$''',
+  '''^https://your-redis\.upstash\.io$''',
+  '''^redis://default:change-me@your-redis\.upstash\.io:6379/0$''',
+  '''^noreply@your-domain\.example\.com$''',
+]
