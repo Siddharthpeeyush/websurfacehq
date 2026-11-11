@@ -41,9 +41,10 @@ supabase db push            # 0001 -> 0002 -> 0003 -> 0004 -> 0005 -> 0006, in o
 psql "$DATABASE_URL" -f supabase/seed.sql
 ```
 
-0005 grants + 0006 policy-cleanup migrations are pending (not applied — see
-`docs/live-proof-evidence-2026-11-11.md`, blocker F2, and review fix F-L1).
-Do not treat the seed as API-readable until they land.
+0005 grants + 0006 policy-cleanup migrations were applied live 12 Nov 2026
+00:14 IST (both "Success. No rows returned" — see
+`docs/live-proof-evidence-2026-11-12.md`). The seed is API-readable, verified
+by the re-proof via PostgREST as service_role.
 
 `$DATABASE_URL` is the project's Postgres connection string (from the
 Supabase dashboard → Project Settings → Database). Apply as a role
@@ -76,4 +77,6 @@ notifications 2, support_tickets 2, attack_paths 2).
 SQL editor as `postgres`, which bypasses RLS and grants — they were NOT verifiable
 via REST/API. All REST reads returned 403/42501 (missing GRANTs — live-proof
 blocker F2; see `docs/live-proof-evidence-2026-11-11.md`). Counts do not prove API
-readability. 0005 grants + 0006 policy-cleanup migrations are pending and NOT applied.
+readability. 0005 grants + 0006 policy-cleanup migrations were applied live
+12 Nov 2026 00:14 IST; the re-proof (`docs/live-proof-evidence-2026-11-12.md`)
+verified all 13 table counts via PostgREST as service_role.
