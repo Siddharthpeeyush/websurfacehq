@@ -17,7 +17,7 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 
 ## Stack
 
-- **Frontend:** Next.js 14 (App Router) + TypeScript + Tailwind — Vercel Hobby ($0)
+- **Frontend:** Next.js 16 (App Router) + TypeScript + Tailwind — Vercel Hobby ($0)
 - **API:** FastAPI (Python) + Pydantic — Render Free
 - **Hot path:** Go `scanner-agent` binary wrapping naabu / httpx / katana / nuclei via exec
 - **DB / Auth / Storage:** Supabase (Postgres + Auth + Storage), RLS on all tables
@@ -106,6 +106,7 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 - **ADR-0002:** Next.js + FastAPI + Go stack — `docs/decisions/adr-0002-nextjs-fastapi-go-stack.md`.
 - **ADR-0003:** Supabase Auth + Postgres + Storage with RLS — `docs/decisions/adr-0003-supabase-auth-rls.md`.
 - **ADR-0004:** Celery + Upstash Redis, 3 routed queues — `docs/decisions/adr-0004-celery-redis-queues.md`.
+- **ADR-0005:** Next.js 14 → 16 upgrade (owner decision 11 Nov 2026) — `docs/decisions/adr-0005-nextjs-16-upgrade.md`. 14.2.35 carried an unpatched critical; the glob override from the run #1 audit fix is removed (Next 16's tree has no glob); ESLint 9 flat config closes the Phase 0 ESLint 8 pin.
 - **Cut from MVP:** auto-exploitation, authenticated scanning, scheduled scans, team
   roles, custom template editor, autonomous remediation, identity blast radius.
 - **Pricing (blueprint):** Free (1 domain, 3 scans/month — locked 11 Nov 2026 by the owner; blueprint §0.4/§1.6 saying 3/day is superseded); Starter Rs 499/mo; Pro Rs 1,499/mo; Business Rs 4,999/mo;

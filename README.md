@@ -21,7 +21,7 @@ configs. See "Phase 0 exit gate" below.
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14 (App Router) + TypeScript + Tailwind — Vercel Hobby |
+| Frontend | Next.js 16 (App Router) + TypeScript + Tailwind — Vercel Hobby |
 | API | FastAPI (Python) + Pydantic — Render Free |
 | Hot path | Go `scanner-agent` binary wrapping naabu / httpx / katana / nuclei (via exec) |
 | Database / Auth / Storage | Supabase (Postgres + Auth + Storage), RLS on all tables |
@@ -121,7 +121,7 @@ suite yet — see `.github/workflows/ci.yml` header note).
 
 - Product design: [docs/system-design.md](docs/system-design.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
-- Decisions: [docs/decisions/](docs/decisions/) (ADRs 0001–0004)
+- Decisions: [docs/decisions/](docs/decisions/) (ADRs 0001–0005)
 - Permissions + `can()` contract: [docs/permissions.md](docs/permissions.md)
 - Threat model: [docs/threat-model.md](docs/threat-model.md)
 - API conventions: [docs/api-conventions.md](docs/api-conventions.md)

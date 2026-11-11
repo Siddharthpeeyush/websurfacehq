@@ -14,7 +14,7 @@ service, and no code outside the scaffold owned by other agents.
                                            ▼
                     ┌─────────────────────────────────────────────────┐
                     │  Vercel — apps/web                               │
-                    │  Next.js 14 (App Router) + TypeScript + Tailwind│
+                    │  Next.js 16 (App Router) + TypeScript + Tailwind│
                     │  Dashboard · Scan wizard · Findings · Reports    │
                     │  Polls GET /scans/{id} every 5s (MVP)           │
                     └──────────────────────┬──────────────────────────┘
@@ -68,7 +68,7 @@ The API never runs a scan itself; the worker never serves HTTP.
 
 | Layer | Chosen | Why | Rejected alternative + why |
 |---|---|---|---|
-| Frontend | Next.js 14 (App Router) + TypeScript + Tailwind on Vercel Hobby ($0) | App Router + RSC, Vercel free tier, TS strictness for a security product, Tailwind design tokens | **Plain React SPA (Vite)**: no SSR/SEO for marketing + sample-report pages, no built-in routing conventions; Next.js is the playbook-friendly default and Vercel hosting is free |
+| Frontend | Next.js 16 (App Router) + TypeScript + Tailwind on Vercel Hobby ($0) | App Router + RSC, Vercel free tier, TS strictness for a security product, Tailwind design tokens | **Plain React SPA (Vite)**: no SSR/SEO for marketing + sample-report pages, no built-in routing conventions; Next.js is the playbook-friendly default and Vercel hosting is free |
 | API | FastAPI (Python) on Render Free | Best Python ecosystem for security tooling, Pydantic validation at the boundary, async, OpenAPI docs free | **Express/Node**: weaker security-tooling ecosystem (no Nuclei/sqlmap-adjacent libraries, no Celery equivalent as mature); Python owns the orchestration layer |
 | Hot path / scanning | Go `scanner-agent` binary (wraps naabu/httpx/katana/nuclei via exec) | Go concurrency for port scanning/crawling; ProjectDiscovery tools are Go-native and pipe JSONL to each other | **Python-only scanning**: Python concurrency + subprocess orchestration is slower and more fragile for 10k-host probes; Go is the right tool for the hot path. (NOT faked in Python — see packages/scanner-agent/README.md) |
 | Database / Auth / Storage | Supabase (Postgres + Auth + Storage), RLS on all tables | One free tier covers DB + proven auth + private storage; RLS enforces tenancy in the database, not just app code | **Hand-rolled Postgres + custom JWT auth**: hand-rolled auth is explicitly forbidden by the playbook and the plan; Supabase Auth is the proven provider |
@@ -100,7 +100,7 @@ websurfacehq/
 │   ├── caching.md               # cache candidates; never tenant data at a shared layer
 │   └── runbooks/                # rollback, health-check-failing, queue-depth-high
 ├── apps/
-│   ├── web/                     # Next.js 14 + TS + Tailwind  (exists in Phase 0)
+│   ├── web/                     # Next.js 16 + TS + Tailwind  (exists in Phase 0)
 │   └── api/                     # FastAPI + Celery            (scaffold exists in Phase 0)
 │       ├── app/
 │       │   ├── main.py          # health, middleware

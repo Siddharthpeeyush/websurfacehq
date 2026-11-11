@@ -9,7 +9,7 @@
 
 - **Brand:** WebSurfaceHQ. websurfacehq.com/.io/.in/.app/.co all free per RDAP (unverified until registrar confirms); no Google company; no Product Hunt launch; @websurfacehq verified free. Numerology 2/2 (weak) — accepted by the user anyway; availability + meaning won.
 - **Format:** website SaaS, not .exe. CLI for CI/CD and PWA are post-MVP options.
-- **Architecture:** modular monolith (playbook default). Frontend Next.js 14 + TypeScript + Tailwind on Vercel. API FastAPI (Python) on Render. Hot path: Go `scanner-agent` binary. DB/Auth/Storage: Supabase Postgres + Auth + Storage, RLS on all tables, `user_id` on every tenant table. Queue: Celery + Upstash Redis, 3 routed queues (recon / crawl / vuln).
+- **Architecture:** modular monolith (playbook default). Frontend Next.js 16 + TypeScript + Tailwind on Vercel. API FastAPI (Python) on Render. Hot path: Go `scanner-agent` binary. DB/Auth/Storage: Supabase Postgres + Auth + Storage, RLS on all tables, `user_id` on every tenant table. Queue: Celery + Upstash Redis, 3 routed queues (recon / crawl / vuln).
 - **Repo:** local scaffold at `~/workspace/websurfacehq/` → GitHub `Siddharthpeeyush/websurfacehq` (public, main). User creates the repo if the connector cannot; pushes via the GitHub connector.
 - **Toolchain gap — RESOLVED 11 Nov 2026 (Phase 0):** Go 1.27.4 installed from
   go.dev (SHA256-verified, user-local `~/go`), `go version go1.27.4 linux/amd64`

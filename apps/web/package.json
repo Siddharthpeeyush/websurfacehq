@@ -1,1 +1,33 @@
-{"dependencies":{"next":"14.2.35","react":"18.3.1","react-dom":"18.3.1"},"description":"WebSurfaceHQ — vulnerability-scanner SaaS frontend (Next.js 14 App Router, TypeScript, Tailwind CSS). Phase 0 scaffold only.","devDependencies":{"@types/node":"22.20.5","@types/react":"18.3.31","@types/react-dom":"18.3.7","autoprefixer":"10.6.2","eslint":"8.57.1","eslint-config-next":"14.2.35","postcss":"8.5.32","prettier":"3.10.0","tailwindcss":"3.4.19","typescript":"5.9.3"},"engines":{"node":">=18.17.0"},"name":"websurfacehq-web","overrides":{"@next/eslint-plugin-next":{"glob":"10.5.0"}},"private":true,"scripts":{"build":"next build","dev":"next dev","lint":"next lint","start":"next start","typecheck":"tsc --noEmit"},"version":"0.1.0"}
+{
+  "dependencies": {
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "description": "WebSurfaceHQ — vulnerability-scanner SaaS frontend (Next.js 16 App Router, TypeScript, Tailwind CSS). Phase 0 scaffold only.",
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "autoprefixer": "10.6.2",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.4.6",
+    "postcss": "8.5.32",
+    "prettier": "3.10.0",
+    "tailwindcss": "3.4.19",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "name": "websurfacehq-web",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev",
+    "lint": "eslint .",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "version": "0.1.0"
+}
