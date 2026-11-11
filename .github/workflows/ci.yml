@@ -1,0 +1,99 @@
+# WebSurfaceHQ CI — fails fast, runs on every push to main and every pull request.
+#
+# Jobs:
+#   web     — Next.js app (apps/web): lint, typecheck, build
+#   api     — FastAPI service (apps/api): ruff, mypy, pytest
+#   secrets — gitleaks secret scan (blocks merges on any real secret)
+#   audit   — dependency audits: npm audit (web) + pip-audit (api)
+#
+# NOTE (Phase 0, honest gap): the web job has NO test step — there is no web
+# test suite yet, and a previous always-exit-0 `npm test` placeholder was
+# removed in the Phase 0 review because a gate that cannot fail is worse
+# than no gate. Re-add a test step when the first real web test lands
+# (Week 1). The api job runs a real pytest suite (11 tests in Phase 0).
+#
+# CI runs on GitHub, so it first runs when the repo is created and pushed
+# (owner action: create Siddharthpeeyush/websurfacehq). Until then, the same
+# commands are verified locally; see README.md "Phase 0 exit gate".
+
+name: CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel an in-progress run only for pull requests — never cancel a run
+  # on main, so a main push always completes its checks.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web:
+    name: web (lint, typecheck, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
+  api:
+    name: api (ruff, mypy, pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy .
+      - run: pytest
+
+  secrets:
+    name: secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  audit:
+    name: audit (npm audit + pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: npm audit (web)
+        working-directory: apps/web
+        run: npm audit --audit-level=high
+      - name: pip-audit (api)
+        working-directory: apps/api
+        run: |
+          python -m pip install pip-audit==2.10.1
+          pip-audit -r requirements.txt
