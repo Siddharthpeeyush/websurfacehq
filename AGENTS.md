@@ -120,8 +120,7 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 
 - [x] **Go installed on this VM** — Go 1.27.4, 11 Nov 2026 (Phase 0, user-local
       `~/go`, SHA256-verified). The Go scanner-agent phase is unblocked.
-- [ ] **GitHub repo not created** — `Siddharthpeeyush/websurfacehq` (public, main).
-      Owner creates it if the connector cannot.
+- [x] **GitHub repo created** — `Siddharthpeeyush/websurfacehq` (public, main), created 11 Nov 2026 by the owner; Phase 0 scaffold + Next 16 migration pushed and verified on main.
 - [ ] **Supabase project not created** — owner creates it in the dashboard when asked (Week 1).
 - [ ] **Domain not registered** — `websurfacehq.com` availability unverified until
       checkout (RDAP "no record" is not proof).
