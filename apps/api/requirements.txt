@@ -1,12 +1,22 @@
 # WebSurfaceHQ API — runtime dependencies (pinned, exact versions).
-# Phase 0 skeleton only. No database / Redis / Celery deps yet — those land in Week 1.
+# Week 1: Supabase (DB/Auth store), Celery + Redis (queue), PyJWT (JWT
+# verification), dnspython (DNS TXT verification). See DEPENDENCIES.md
+# for the reason each package is here.
 fastapi==0.162.4
 uvicorn[standard]==0.54.0
 pydantic==2.14.3
 pydantic-settings==2.16.2
 httpx==0.28.1
+PyJWT==2.10.1
+supabase==2.18.0
+gotrue==2.12.3
+redis==5.2.1
+email-validator==2.3.0
+dnspython==2.9.2
+celery==5.7.0
 
 # Dev / test / quality tooling (also pinned).
 pytest==9.2.0
 ruff==0.17.4
 mypy==2.4.1
+fakeredis==2.40.0

@@ -1,11 +1,10 @@
 """WebSurfaceHQ API — FastAPI application (Phase 0 skeleton).
 
 Endpoints:
-- ``GET /health`` — liveness check. Returns 200 ``{"status": "ok"}``.
-  NOTE (Phase 0): this is liveness-only. It does NOT check the database or
-  Redis — there is no database yet. Per the engineering plan, component
-  checks (DB / Redis / queue, with timeouts and per-component status) land
-  in Week 1, when Supabase and Upstash are wired in.
+- ``GET /health`` — liveness + component checks (Week 1: DB / Redis /
+  queue, each with a timeout; a component that is not configured reports
+  ``"not_configured"`` rather than failing the check). Returns 200 with
+  ``{"status": "ok" | "degraded", "components": {...}}``.
 - ``GET /live`` — lightweight endpoint for load balancers / uptime monitors.
 
 Every request gets a request-id (``X-Request-ID`` response header, and on
@@ -22,14 +21,20 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-from app.core.config import settings
+from app.core.config import Environment, settings
 from app.core.errors import ApiError, ErrorResponse
+from app.core.health import health_payload
 from app.core.logging import configure_logging, logger, request_id_var
+from app.routers import auth as auth_router
+from app.routers import findings as findings_router
+from app.routers import scans as scans_router
+from app.routers import targets as targets_router
 
 configure_logging(logging.INFO)
 
@@ -124,7 +129,45 @@ def create_app() -> FastAPI:
         docs_url="/docs" if not settings.is_production else None,
         redoc_url="/redoc" if not settings.is_production else None,
     )
+    # CORS first, so RequestContextMiddleware (added next) is outermost and
+    # its security headers + request-id land on every response, including
+    # CORS preflight responses (CORSMiddleware short-circuits OPTIONS).
+    # Bearer tokens only — no cookies — so allow_credentials stays False.
+    # Origins come from settings.cors_origins (no wildcard in prod).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    )
     app.add_middleware(RequestContextMiddleware)
+
+    # Rate limiter backend (M6 review fix): staging/production share
+    # buckets across replicas via Redis; development keeps the in-memory
+    # limiter. The Redis client connects lazily — a down Redis at startup
+    # does not crash the app; the limiter fails OPEN at runtime (loudly
+    # logged) so a cache outage never locks every user out of login.
+    if settings.environment is Environment.DEVELOPMENT:
+        logger.info("rate limiter: in-memory backend (development)")
+    else:
+        from app.auth.rate_limit import (
+            RateLimiter,
+            redis_client_from_settings,
+            set_rate_limiter,
+        )
+
+        try:
+            set_rate_limiter(RateLimiter(redis_client_from_settings()))
+            logger.info("rate limiter: Redis backend")
+        except Exception:  # noqa: BLE001 - fall back to in-memory, loudly
+            logger.warning("rate limiter: Redis client build failed; using in-memory")
+
+    # Week 1 routers (all under /api/v1; see docs/api-conventions.md).
+    app.include_router(auth_router.router)
+    app.include_router(targets_router.router)
+    app.include_router(scans_router.router)
+    app.include_router(findings_router.router)
 
     @app.exception_handler(ApiError)
     async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
@@ -172,12 +215,11 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        # Phase 0: liveness-only. No DB/Redis exists yet to check; component
-        # checks land in Week 1 per the engineering plan. This endpoint is
-        # REAL (it proves the process is up and responding) — nothing is
-        # mocked or faked here.
-        return {"status": "ok"}
+    async def health() -> dict[str, object]:
+        # Week 1: liveness + per-component status (DB / Redis / queue).
+        # Always 200 while the process is up — the body carries "ok" vs
+        # "degraded"; monitors alert on the body, not the status code.
+        return health_payload()
 
     @app.get("/live")
     async def live() -> dict[str, str]:

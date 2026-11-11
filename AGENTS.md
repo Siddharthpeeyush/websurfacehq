@@ -91,10 +91,10 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 |---|---|---|
 | `npm run dev` / `npm run build` / `npm run lint` | `apps/web` | Frontend dev / build / lint |
 | `uvicorn app.main:app --reload` | `apps/api` | API dev server |
-| `celery -A app.workers.celery_app worker --loglevel=info` | `apps/api` | Celery worker (Week 1 — `app.workers` does not exist yet in Phase 0) |
-| `pytest` | `apps/api` | Unit tests — 11 passing in Phase 0 (integration vs real DB lands Week 1) |
-| `curl localhost:8000/health` | anywhere | Health check (expect 200 `{"status": "ok"}` — liveness-only in Phase 0; component checks land Week 1) |
-| `supabase db push` | repo root | Apply migrations (staging first, then prod) — Week 1, no migrations exist yet |
+| `celery -A app.workers.celery_app worker --loglevel=info` | `apps/api` | Celery worker (Week 1 — exists; needs a Redis broker, see `.env.example`) |
+| `pytest` | `apps/api` | Tests — 168 passing in Week 1 (incl. 401/403/404 matrix, cross-tenant, SSRF, idempotency, DLQ, review-fix tests) |
+| `curl localhost:8000/health` | anywhere | Health check: 200 `{"status": "ok" \| "degraded", "components": {...}}` (DB / Redis / queue) |
+| `supabase db push` | repo root | Apply migrations (staging first, then prod) — Week 1 migrations 0001–0004 exist; the project exists now (see blockers) but this VM has no DB password / access token, so the parent applies them via the dashboard SQL editor: 0001 → 0002 → 0003 → 0004, then `seed.sql` (seed auth users first, exact UUIDs in `seed.sql`) |
 
 ## Decisions so far
 
@@ -107,6 +107,9 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 - **ADR-0003:** Supabase Auth + Postgres + Storage with RLS — `docs/decisions/adr-0003-supabase-auth-rls.md`.
 - **ADR-0004:** Celery + Upstash Redis, 3 routed queues — `docs/decisions/adr-0004-celery-redis-queues.md`.
 - **ADR-0005:** Next.js 14 → 16 upgrade (owner decision 11 Nov 2026) — `docs/decisions/adr-0005-nextjs-16-upgrade.md`. 14.2.35 carried an unpatched critical; the glob override from the run #1 audit fix is removed (Next 16's tree has no glob); ESLint 9 flat config closes the Phase 0 ESLint 8 pin.
+- **ADR-0006:** Week 1 foundation decisions (11 Nov 2026) — `docs/decisions/adr-0006-week-1-foundation.md`. Token-hash storage, `websurfacehq-verify=` TXT format, PyJWT verification, auth through our API (localStorage token trade-off), two-layer tenancy (can() + RLS, service-role delete reasoning), Store protocol + InMemoryStore, best-effort dispatch, Celery backoff 60/120/240, CSP `connect-src` API origin, locked constants (token 32B / 7d, signed URL 15 min, Free 3/month + 1 active, login 5/15 min).
+- **Week 1 scope (completed 11 Nov 2026, pending live Supabase):** migrations 0001–0004 + RLS on all 13 tables (live-Postgres validated 83/83 incl. the 0004 H4 PostgREST simulation + M4/M3 partial indexes + INSERT probes + REVOKE proofs) + 2-tenant seed; Supabase Auth flows via our API; central `can()` on every route; FastAPI + Celery skeleton (3 queues, idempotent task ids, retry/DLQ); target verification (DNS TXT / well-known file); SSRF blocklist + DNS-rebinding check; frontend shell + design system + auth screens. 168 API tests passing; web lint/typecheck/build green; live smoke (API + web servers) verified. Independent review #1 returned NOT APPROVED (5 High, 10 Medium, 16 Low, no Critical) — all 5 Highs + most Mediums/Lows fixed in the working tree (see ADR-0006 Addendum A). Re-review #2 ALSO returned NOT APPROVED (2 blockers: H4 INSERT bypass — the UPDATE triggers did not stop a forged-verified INSERT; M3 cap race — no DB enforcement) + 10 non-blocking findings — all fixed in the working tree (INSERT trigger, M3 partial unique index + TargetCapError, server-table REVOKEs, M5 dead-code fix, H1 code match, worker audit hashing, lock retry, list_scans filter, sign_out trust_env, celery comment). Focused re-check #3 returned **APPROVED** (11 Nov 2026) — both blockers verified closed with independent evidence — and its 3 new Lows were folded in the same pass (attack_paths REVOKE, INSERT-trigger expiry/method, NULL-hash verify guard; validator fidelity fix: pre-grant + has_table_privilege REVOKE proofs). Week 1 is ready to push. NOT proven live yet: the full auth flow and the cross-tenant check against real Supabase (migrations not yet applied — parent applies via dashboard), and the Celery worker against a real broker.
+- **Week 1 review-fix rules (11 Nov 2026, from the fix pass):** a column-level REVOKE is a NO-OP against a table-level UPDATE grant in Postgres — use a trigger for field-level write bans (proven by the pgserver run). UPDATE triggers do NOT cover INSERT — every write ban needs both (proven by the round-2 re-review's INSERT probe). RLS UPDATE with no UPDATE policy affects 0 rows silently (no error); a missing GRANT raises InsufficientPrivilege — a validator must check the row state, not just expect an exception. A validator's own GRANT block can silently undo the migration's REVOKEs — model the real privilege state (table-level DML except where the migration revoked). A validator that CONSTRUCTS the expected privilege state cannot prove a REVOKE — pre-grant the default privileges before applying the migration and assert with `has_table_privilege` (round-3 lesson). An INSERT trigger must cover EVERY verification-evidence field (status, hash, verified_at, verified_by, expires_at, method) — a field left out is a forgery vector (round-3 lesson). A server-created table is only closed when it is in the REVOKE list — `attack_paths` was missed in the first pass because it lives in 0003, not 0001 (round-3 lesson). `hmac.compare_digest` raises TypeError on a None hash — guard NULL stored hashes before comparing (round-3 lesson). `httpx.stream` needs `trust_env=False` in the scanner (this VM's proxy env breaks httpx URL parsing; a proxy would also defeat SSRF checks). fakeredis has no EVAL — use WATCH/MULTI for atomic compare-and-delete. `pkill -f` self-matches when the literal pattern sits in the shell's cmdline — build the pattern via a variable (or kill by PID); port-closed is the reliable "server stopped" proof. `UnsafeUrlError` subclasses `ValueError` — never raise it inside a `try/except ValueError`. The `Scan` dataclass had no `deleted_at` field at all — a list filter on it crashes; the field must exist on the row shape, not just in SQL. provider.py binds `create_client` at import — tests must patch `app.auth.provider.create_client`, not `supabase.create_client`.
 - **Cut from MVP:** auto-exploitation, authenticated scanning, scheduled scans, team
   roles, custom template editor, autonomous remediation, identity blast radius.
 - **Pricing (blueprint):** Free (1 domain, 3 scans/month — locked 11 Nov 2026 by the owner; blueprint §0.4/§1.6 saying 3/day is superseded); Starter Rs 499/mo; Pro Rs 1,499/mo; Business Rs 4,999/mo;
@@ -121,22 +124,15 @@ Spec: blueprint v4 (`~/workspace/vuln-scanner-platform/PDF-SOURCE.md`).
 - [x] **Go installed on this VM** — Go 1.27.4, 11 Nov 2026 (Phase 0, user-local
       `~/go`, SHA256-verified). The Go scanner-agent phase is unblocked.
 - [x] **GitHub repo created** — `Siddharthpeeyush/websurfacehq` (public, main), created 11 Nov 2026 by the owner; Phase 0 scaffold + Next 16 migration pushed and verified on main.
-- [ ] **Supabase project not created** — owner creates it in the dashboard when asked (Week 1).
+- [x] **Supabase project not created** — RESOLVED 11 Nov 2026: project **websurfacehq** exists (ref `dpwfshafzyxyfoktsggo`, `https://dpwfshafzyxyfoktsggo.supabase.co`, Singapore ap-southeast-1, Nano, Healthy — verified live via `/auth/v1/settings` 200). URL + anon key wired into gitignored local env files only (`apps/api/.env`, `apps/web/.env.local`); `.env.example` keeps placeholders. **Still open:** (a) migrations 0001 → 0002 → 0003 → 0004 + `seed.sql` are NOT applied — this VM has no DB password / access token / service-role key, so the parent applies them via the dashboard SQL editor (seed auth users first, exact UUIDs in `seed.sql`); (b) the **service-role key and JWT secret were deliberately NOT retrieved** — until they are set, `supabase_configured` is False, auth endpoints answer 503, JWT verification answers 401 (by design, never a silent anon-key fallback). Do NOT substitute the anon key for either.
 - [ ] **Domain not registered** — `websurfacehq.com` availability unverified until
       checkout (RDAP "no record" is not proof).
 - [x] **Free-tier quota** — RESOLVED 11 Nov 2026: 3 scans/month (owner's pick;
       blueprint §0.4/§1.6 saying 3/day is superseded).
-- [ ] **CI gitleaks findings (11 Nov 2026, CI agent report, confirmed by
-      coordinator re-scan):** gitleaks flagged 3 findings in `apps/web/.next/`
-      build output — per-build ephemeral encryption/signing keys
-      (`previewModeEncryptionKey`, `previewModeSigningKey`, `encryptionKey` in
-      `prerender-manifest.json` and `server-reference-manifest.json`), rotated
-      every build. Not long-lived credentials and worthless in this scaffold
-      (no preview mode, no Server Actions exist) — but they ARE real keys, not
-      "hashes". Fix is `.gitignore`: `.next/` and `node_modules/` are ignored,
-      so generated build output can never be committed and trip the CI secrets
-      job. Do NOT add `.next` to the gitleaks allowlist. Also ignored: Python
-      tool caches `.mypy_cache/`, `.ruff_cache/`, `.pytest_cache/`,
-      `__pycache__/` (generated output must never be committed or trip CI
-      secrets/audit jobs). The ignore is operative only once the repo is in
-      git (see the GitHub-repo blocker above).
+- [x] **CI gitleaks findings (11 Nov 2026)** — RESOLVED: the flagged keys were
+      per-build ephemeral keys in `apps/web/.next/` build output; `.next/` and
+      `node_modules/` are gitignored, so generated output can never be
+      committed or trip the CI secrets job. CI run #3 (Next 16) passed the
+      secrets job; no allowlist entry was added. Python tool caches
+      (`.mypy_cache/`, `.ruff_cache/`, `.pytest_cache/`, `__pycache__/`) are
+      ignored the same way.

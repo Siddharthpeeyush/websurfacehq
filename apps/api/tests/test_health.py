@@ -12,10 +12,18 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_health_returns_200_ok() -> None:
+def test_health_returns_200_with_component_status() -> None:
+    # Week 1 contract: /health returns {"status", "components"} — the
+    # status is "ok" only when every configured component is up; in this
+    # test environment Redis is not running, so "degraded" is the honest
+    # answer and the test asserts the SHAPE, not a fixed status.
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert set(body.keys()) == {"status", "components"}
+    assert body["status"] in ("ok", "degraded")
+    assert set(body["components"].keys()) == {"database", "redis", "queue"}
+    assert body["components"]["database"]["status"] == "ok"
 
 
 def test_live_returns_200_alive() -> None:
