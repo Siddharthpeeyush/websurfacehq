@@ -2,6 +2,14 @@
 
 **Status:** Accepted (coordinator integration pass, Week 1).
 
+> **Superseded in part (11 Nov 2026, review fix F-L8):** §3 below still
+> describes JWT verification as HS256 with `SUPABASE_JWT_SECRET`. That
+> is superseded by **ADR-0007** — the live project signs ES256, the API
+> verifies ES256 against the project's public JWKS by `kid`, HS256 is
+> removed entirely, and `iss`/`aud` are now REQUIRED claims. Read
+> `docs/decisions/adr-0007-es256-jwks-jwt-verification.md` for the
+> current verification design; §3 here is retained as history only.
+
 ## Context
 
 Week 1 builds the foundation: Supabase schema + RLS, Supabase Auth,

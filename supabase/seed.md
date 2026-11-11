@@ -37,9 +37,13 @@ on the `auth.users` foreign key:
 ## Step 2 — Apply migrations, then the seed
 
 ```bash
-supabase db push            # 0001 -> 0002 -> 0003, in order
+supabase db push            # 0001 -> 0002 -> 0003 -> 0004 -> 0005 -> 0006, in order
 psql "$DATABASE_URL" -f supabase/seed.sql
 ```
+
+0005 grants + 0006 policy-cleanup migrations are pending (not applied — see
+`docs/live-proof-evidence-2026-11-11.md`, blocker F2, and review fix F-L1).
+Do not treat the seed as API-readable until they land.
 
 `$DATABASE_URL` is the project's Postgres connection string (from the
 Supabase dashboard → Project Settings → Database). Apply as a role
@@ -63,7 +67,13 @@ Sign in as tenant A and confirm:
 4. Repeat mirrored as tenant B.
 
 **Status: APPLIED live 11 Nov 2026** — migrations 0001–0004 + seed
-applied via the dashboard SQL editor; all 13 tables exist; row counts
-verified (targets 2, scans 2, assets 4, findings 4, scan_jobs 2,
+applied via the dashboard SQL editor as `postgres`; all 13 tables exist; row counts
+verified via the SQL editor (targets 2, scans 2, assets 4, findings 4, scan_jobs 2,
 audit_logs 2, subscriptions 2, teams 1, team_members 1, api_keys 2,
 notifications 2, support_tickets 2, attack_paths 2).
+
+**Caveat (live proof, 11 Nov 2026):** those counts were verified via the dashboard
+SQL editor as `postgres`, which bypasses RLS and grants — they were NOT verifiable
+via REST/API. All REST reads returned 403/42501 (missing GRANTs — live-proof
+blocker F2; see `docs/live-proof-evidence-2026-11-11.md`). Counts do not prove API
+readability. 0005 grants + 0006 policy-cleanup migrations are pending and NOT applied.

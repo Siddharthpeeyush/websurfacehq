@@ -15,12 +15,36 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
+from app.db import reset_store_for_tests
 from app.db.memory import TENANT_A_USER_ID, TENANT_B_USER_ID, InMemoryStore
 from app.main import create_app
 from app.routers.deps import User, get_current_user, get_store_dep
 
 USER_A = User(id=TENANT_A_USER_ID, email="a@example.com")
 USER_B = User(id=TENANT_B_USER_ID, email="b@example.com")
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same isolation as tests/test_health.py (review fix F-M1).
+
+    ``test_health_payload_shape`` asserts ``database.status == "ok"``
+    through the ``app.db.get_store()`` singleton, which the router
+    dependency overrides in this file do NOT replace — without this
+    fixture the test passes only when an earlier test happened to prime
+    the singleton to an in-memory store, and fails run alone with a
+    real ``.env`` (SupabaseStore ping hits live PostgREST). Force the
+    in-memory store and drop the cached singleton before/after each
+    test. The other tests here use override stores, so they are
+    unaffected.
+    """
+    monkeypatch.setattr(settings, "supabase_url", None)
+    monkeypatch.setattr(settings, "supabase_anon_key", None)
+    monkeypatch.setattr(settings, "supabase_service_role_key", None)
+    reset_store_for_tests()
+    yield
+    reset_store_for_tests()
 
 
 def _client(store: InMemoryStore, user: User | None) -> TestClient:

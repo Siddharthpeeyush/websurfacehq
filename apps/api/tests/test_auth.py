@@ -1,28 +1,37 @@
 """Tests for the auth endpoints (``/api/v1/auth``) and JWT verification.
 
 Uses a test-only in-memory ``FakeAuthProvider`` (never shipped as a
-production fallback) whose login tokens are real HS256 JWTs signed with
-the test secret, so ``GET /me`` exercises the real ``verify_token`` path.
+production fallback) whose login tokens are real ES256 JWTs signed with a
+test-only EC P-256 keypair, so ``GET /me`` exercises the real
+``verify_token`` path against a stubbed JWKS (no network, no live keys).
 
 Matrix covered here: no token -> 401, bad token -> 401, good token -> 200;
 rate limit: 6th login attempt within 15 min -> 429 with ``Retry-After``,
 per IP AND per email; signup validation errors -> 422 without echoing the
-password; callback with a bad code -> 401.
+password; callback with a bad code -> 401. Plus the ES256/JWKS matrix:
+wrong kid -> 401, HS256 token -> 401, expired -> 401, bad signature ->
+401, unknown kid triggers a JWKS refresh (and still 401s when absent),
+rotated kid verifies after refresh.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import time
 import uuid
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.auth.jwt import User
+from app.auth import jwt as jwt_module
+from app.auth.jwt import User, _index_jwks, verify_token
 from app.auth.provider import (
     AuthSession,
     AuthUser,
@@ -34,40 +43,88 @@ from app.core.config import settings
 from app.core.errors import ApiError
 from app.main import create_app
 
-TEST_SECRET = "test only, not a real secret, do not use"
+# Test-only EC P-256 keypair (generated fresh per test session, never a
+# live key). Tokens are ES256, signed with this key, ``kid`` TEST_KID —
+# mirroring the live Supabase ES256/JWKS shape (ADR-0007).
+_TEST_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_TEST_KID = "test-key-1"
+TEST_SUPABASE_URL = "https://example.supabase.co"
 USER_EMAIL = "user@example.com"
 USER_PASSWORD = "correct-horse-battery"
+
+
+def _b64url(value: int) -> str:
+    """Base64url-encode a P-256 coordinate (32 bytes, no padding)."""
+    return base64.urlsafe_b64encode(value.to_bytes(32, "big")).rstrip(b"=").decode("ascii")
+
+
+def _test_jwk() -> dict[str, Any]:
+    """The public half of the test keypair, as a JWKS entry."""
+    numbers = _TEST_PRIVATE_KEY.public_key().public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "alg": "ES256",
+        "use": "sig",
+        "kid": _TEST_KID,
+        "x": _b64url(numbers.x),
+        "y": _b64url(numbers.y),
+    }
+
+
+def _test_jwks() -> dict[str, Any]:
+    return {"keys": [_test_jwk()]}
+
+
+def _mint_es256(
+    *,
+    user_id: str | None = None,
+    email: str = USER_EMAIL,
+    key: Any = _TEST_PRIVATE_KEY,
+    kid: str = _TEST_KID,
+    algorithm: str = "ES256",
+    claims: dict[str, Any] | None = None,
+    omit: tuple[str, ...] = (),
+) -> str:
+    """Mint a test token (defaults: valid ES256, test key, test kid).
+
+    ``omit`` drops claims from the payload after ``claims`` are applied —
+    used to prove a missing ``iss`` / ``aud`` is rejected (F-L4).
+    """
+    now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "sub": user_id or str(uuid.uuid4()),
+        "email": email,
+        "iss": TEST_SUPABASE_URL + "/auth/v1",
+        "aud": "authenticated",
+        "role": "authenticated",
+        "iat": now,
+        "exp": now + timedelta(hours=1),
+    }
+    if claims:
+        payload.update(claims)
+    for name in omit:
+        payload.pop(name, None)
+    headers = {"kid": kid} if kid else None
+    return jwt.encode(payload, key, algorithm=algorithm, headers=headers)
 
 
 class FakeAuthProvider:
     """In-memory auth provider, TESTS ONLY.
 
     Passwords are stored as SHA-256 digests (test-only: no salt, no
-    stretching — never a production pattern). Login tokens are real HS256
+    stretching — never a production pattern). Login tokens are real ES256
     JWTs so the real verification path is exercised end to end.
     """
 
-    def __init__(self, secret: str = TEST_SECRET) -> None:
-        self._secret = secret
+    def __init__(self) -> None:
         self._users: dict[str, dict[str, str]] = {}
         self._codes: dict[str, str] = {}
         self.revoked_tokens: set[str] = set()
         self.reset_requested: list[str] = []
 
     def _mint(self, user_id: str, email: str) -> AuthSession:
-        now = datetime.now(timezone.utc)
-        token = jwt.encode(
-            {
-                "sub": user_id,
-                "email": email,
-                "aud": "authenticated",
-                "role": "authenticated",
-                "iat": now,
-                "exp": now + timedelta(hours=1),
-            },
-            self._secret,
-            algorithm="HS256",
-        )
+        token = _mint_es256(user_id=user_id, email=email)
         return AuthSession(
             access_token=token,
             token_type="bearer",
@@ -116,9 +173,21 @@ class FakeAuthProvider:
 
 @pytest.fixture(autouse=True)
 def _test_auth_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """JWT verification uses the test secret; no Supabase project exists."""
-    monkeypatch.setattr(settings, "supabase_jwt_secret", SecretStr(TEST_SECRET))
-    monkeypatch.setattr(settings, "supabase_url", None)
+    """JWT verification uses the stubbed test JWKS; no Supabase project exists.
+
+    ``verify_token`` fetches the JWKS from ``<supabase_url>/auth/v1/
+    .well-known/jwks.json`` — here the fetch is stubbed to return the
+    test keypair's public JWK, and the cache is cleared so no test sees
+    another test's keys. The anon/service keys are forced to None so
+    ``supabase_configured`` stays False (no real project, no real store
+    or provider calls) even when a local .env carries real values — only
+    the URL is set, because that is what locates the JWKS.
+    """
+    monkeypatch.setattr(settings, "supabase_url", TEST_SUPABASE_URL)
+    monkeypatch.setattr(settings, "supabase_anon_key", None)
+    monkeypatch.setattr(settings, "supabase_service_role_key", None)
+    monkeypatch.setattr(jwt_module, "_fetch_jwks", _test_jwks)
+    jwt_module.reset_jwks_cache()
 
 
 @pytest.fixture()
@@ -263,20 +332,14 @@ def test_me_with_bad_token_returns_401(
     assert response.json()["code"] == "UNAUTHORIZED"
 
 
-def test_me_with_wrong_secret_token_returns_401(
+def test_me_with_wrong_key_token_returns_401(
     auth_client: tuple[TestClient, FakeAuthProvider],
 ) -> None:
+    # Signed with a DIFFERENT EC key but the test kid: the JWKS lookup
+    # succeeds, the signature check fails -> 401.
     client, _fake = auth_client
-    token = jwt.encode(
-        {
-            "sub": str(uuid.uuid4()),
-            "email": USER_EMAIL,
-            "aud": "authenticated",
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
-        },
-        "a-different-secret",
-        algorithm="HS256",
-    )
+    other_key = ec.generate_private_key(ec.SECP256R1())
+    token = _mint_es256(key=other_key)
     response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
@@ -285,16 +348,7 @@ def test_me_with_expired_token_returns_401(
     auth_client: tuple[TestClient, FakeAuthProvider],
 ) -> None:
     client, _fake = auth_client
-    token = jwt.encode(
-        {
-            "sub": str(uuid.uuid4()),
-            "email": USER_EMAIL,
-            "aud": "authenticated",
-            "exp": datetime.now(timezone.utc) - timedelta(seconds=10),
-        },
-        TEST_SECRET,
-        algorithm="HS256",
-    )
+    token = _mint_es256(claims={"exp": datetime.now(timezone.utc) - timedelta(seconds=10)})
     response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
@@ -532,7 +586,6 @@ def test_supabase_sign_up_duplicate_detected_by_code(
         supabase_url="https://example.supabase.co",
         supabase_anon_key="anon-key",
         supabase_service_role_key=SecretStr("service-key"),
-        supabase_jwt_secret=SecretStr("jwt-secret"),
     )
     assert settings.supabase_configured is True
 
@@ -584,21 +637,13 @@ def test_supabase_provider_raises_503_when_not_configured() -> None:
     assert excinfo.value.code == "SUPABASE_NOT_CONFIGURED"
 
 
-def test_verify_token_without_configured_secret_returns_401(
+def test_verify_token_without_supabase_url_returns_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.auth.jwt import verify_token
-
-    monkeypatch.setattr(settings, "supabase_jwt_secret", None)
-    token = jwt.encode(
-        {
-            "sub": str(uuid.uuid4()),
-            "email": USER_EMAIL,
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
-        },
-        TEST_SECRET,
-        algorithm="HS256",
-    )
+    # No project URL means no JWKS to verify against — every token 401s,
+    # even one signed by the test key.
+    monkeypatch.setattr(settings, "supabase_url", None)
+    token = _mint_es256()
     with pytest.raises(ApiError) as excinfo:
         verify_token(token)
     assert excinfo.value.status_code == 401
@@ -607,3 +652,267 @@ def test_verify_token_without_configured_secret_returns_401(
 def test_user_dataclass_defaults_to_owner_role() -> None:
     user = User(id=uuid.uuid4(), email=USER_EMAIL)
     assert user.role == "owner"
+
+
+# --- ES256 / JWKS verification (ADR-0007) --------------------------------------
+
+
+def test_verify_token_accepts_valid_es256_token() -> None:
+    user = verify_token(_mint_es256(), jwks={_TEST_KID: _test_jwk()})
+    assert user.email == USER_EMAIL
+    assert isinstance(user.id, uuid.UUID)
+
+
+def test_verify_token_unknown_kid_returns_401() -> None:
+    token = _mint_es256(kid="no-such-kid")
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_missing_kid_returns_401() -> None:
+    token = _mint_es256(kid="")
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_hs256_token_returns_401() -> None:
+    # HS256 is rejected on the alg header alone — there is no
+    # shared-secret fallback (ADR-0007).
+    token = jwt.encode(
+        {
+            "sub": str(uuid.uuid4()),
+            "email": USER_EMAIL,
+            "aud": "authenticated",
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+        },
+        "any-shared-secret-that-is-long-enough",
+        algorithm="HS256",
+        headers={"kid": _TEST_KID},
+    )
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_alg_none_returns_401() -> None:
+    # F-L7: the alg != ES256 header check covers "none" by construction,
+    # but pin it explicitly — an unsigned token must never verify, even
+    # with the right kid and claims.
+    token = _mint_es256(algorithm="none", key=None)
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_missing_iss_returns_401() -> None:
+    # F-L4: iss is REQUIRED when a project URL is configured — a token
+    # carrying no issuer is a foreign token, not a Supabase token.
+    token = _mint_es256(omit=("iss",))
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_wrong_iss_returns_401() -> None:
+    token = _mint_es256(claims={"iss": "https://other.supabase.co/auth/v1"})
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_missing_aud_returns_401() -> None:
+    # F-L4: aud is REQUIRED — a token minted for no audience (or any
+    # audience other than "authenticated") must never verify.
+    token = _mint_es256(omit=("aud",))
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_wrong_aud_returns_401() -> None:
+    token = _mint_es256(claims={"aud": "someone-else"})
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_missing_role_still_verifies() -> None:
+    # F-L4 / ADR-0007: role stays "when present" — it is redundant with
+    # aud (same "authenticated" value, same issuer), so a token without
+    # the claim verifies; a present-but-wrong role still 401s (below).
+    token = _mint_es256(omit=("role",))
+    user = verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert user.email == USER_EMAIL
+
+
+def test_verify_token_wrong_role_returns_401() -> None:
+    token = _mint_es256(claims={"role": "service_role"})
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_index_jwks_filters_non_es256_entries() -> None:
+    # F-L7: a JWKS entry whose alg is present and not ES256 (or whose
+    # kty/crv is not EC P-256) must never enter the key index — it can
+    # never be selected to verify a token.
+    indexed = _index_jwks(
+        {
+            "keys": [
+                _test_jwk(),
+                {
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "kid": "rsa-kid",
+                    "n": "abc",
+                    "e": "AQAB",
+                },
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "alg": "ES384",
+                    "kid": "es384-kid",
+                    "x": "abc",
+                    "y": "def",
+                },
+                {"kty": "EC", "crv": "P-384", "alg": "ES256", "kid": "p384-kid"},
+            ]
+        }
+    )
+    assert set(indexed) == {_TEST_KID}
+
+
+def test_verify_token_bad_signature_returns_401() -> None:
+    # Same kid, but signed by a different EC key: the JWKS lookup
+    # succeeds and the signature check fails.
+    other_key = ec.generate_private_key(ec.SECP256R1())
+    token = _mint_es256(key=other_key)
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_verify_token_expired_returns_401() -> None:
+    token = _mint_es256(claims={"exp": datetime.now(timezone.utc) - timedelta(seconds=10)})
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token, jwks={_TEST_KID: _test_jwk()})
+    assert excinfo.value.status_code == 401
+
+
+def test_unknown_kid_triggers_jwks_refresh_and_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    def _counting_fetch() -> dict[str, Any]:
+        calls["n"] += 1
+        return _test_jwks()
+
+    monkeypatch.setattr(jwt_module, "_fetch_jwks", _counting_fetch)
+    jwt_module.reset_jwks_cache()
+    # Prime the cache with a successful verification.
+    assert verify_token(_mint_es256()).email == USER_EMAIL
+    assert calls["n"] == 1
+    # A token signed by another key under an unknown kid...
+    other_key = ec.generate_private_key(ec.SECP256R1())
+    token = _mint_es256(key=other_key, kid="rotated-kid")
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(token)
+    assert excinfo.value.status_code == 401
+    # ...triggered exactly one JWKS refresh (the rotation path), and
+    # still failed because the kid is absent from the refreshed JWKS.
+    assert calls["n"] == 2
+
+
+def test_rotated_kid_verifies_after_jwks_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key rotation: the new kid is absent from the cached JWKS but
+    # present in the JWKS the refresh returns — the token must verify.
+    new_key = ec.generate_private_key(ec.SECP256R1())
+    new_numbers = new_key.public_key().public_numbers()
+    new_jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "alg": "ES256",
+        "use": "sig",
+        "kid": "rotated-kid",
+        "x": _b64url(new_numbers.x),
+        "y": _b64url(new_numbers.y),
+    }
+    calls = {"n": 0}
+
+    def _rotating_fetch() -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _test_jwks()
+        return {"keys": [_test_jwk(), new_jwk]}
+
+    monkeypatch.setattr(jwt_module, "_fetch_jwks", _rotating_fetch)
+    jwt_module.reset_jwks_cache()
+    assert verify_token(_mint_es256()).email == USER_EMAIL
+    assert calls["n"] == 1
+    token = _mint_es256(key=new_key, kid="rotated-kid")
+    user = verify_token(token)
+    assert user.email == USER_EMAIL
+    assert calls["n"] == 2
+
+
+def test_stale_jwks_cache_within_24h_verifies_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F-L3: a fetch failure falls back to the cached keys while the cache
+    # is at most 24 hours old — a transient outage does not 401 every
+    # authenticated request.
+    def _failing_fetch() -> dict[str, Any]:
+        raise jwt_module._JwksFetchError("network down")
+
+    jwt_module.reset_jwks_cache()
+    assert verify_token(_mint_es256()).email == USER_EMAIL  # primes cache
+    monkeypatch.setattr(jwt_module, "_fetch_jwks", _failing_fetch)
+    # Age the cache past the 1h TTL (so a fetch is attempted) but well
+    # inside the 24h stale bound.
+    jwt_module._JWKS_CACHE._fetched_at = time.monotonic() - 23 * 3600
+    assert verify_token(_mint_es256()).email == USER_EMAIL
+
+
+def test_stale_jwks_cache_beyond_24h_returns_401_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F-L3: the same fetch failure with a cache older than 24 hours is
+    # refused — a rotated-away key must not verify tokens indefinitely
+    # during a fetch outage.
+    def _failing_fetch() -> dict[str, Any]:
+        raise jwt_module._JwksFetchError("network down")
+
+    jwt_module.reset_jwks_cache()
+    assert verify_token(_mint_es256()).email == USER_EMAIL  # primes cache
+    monkeypatch.setattr(jwt_module, "_fetch_jwks", _failing_fetch)
+    jwt_module._JWKS_CACHE._fetched_at = time.monotonic() - 25 * 3600
+    with pytest.raises(ApiError) as excinfo:
+        verify_token(_mint_es256())
+    assert excinfo.value.status_code == 401
+
+
+def test_me_with_hs256_token_returns_401(
+    auth_client: tuple[TestClient, FakeAuthProvider],
+) -> None:
+    # End-to-end: an HS256 token (the old verification path) is rejected
+    # by /me even when it carries the right claims and kid.
+    client, _fake = auth_client
+    token = jwt.encode(
+        {
+            "sub": str(uuid.uuid4()),
+            "email": USER_EMAIL,
+            "aud": "authenticated",
+            "role": "authenticated",
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+        },
+        "any-shared-secret-that-is-long-enough",
+        algorithm="HS256",
+        headers={"kid": _TEST_KID},
+    )
+    response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401

@@ -5,11 +5,41 @@ no mocks.
 
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
+from app.db import reset_store_for_tests
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate /health from the environment (review fix F-M1).
+
+    ``/health`` reads the database component through the module
+    singleton ``app.db.get_store()``. Without this fixture the test
+    asserts ``database.status == "ok"`` against whatever store an
+    earlier test primed (``test_auth.py``'s logout test leaves an
+    ``InMemoryStore`` cached) — and run alone with a real ``.env``
+    present, ``get_store()`` selects ``SupabaseStore`` and the ping
+    hits live PostgREST (403 pre-0005) and the test fails. So this
+    fixture forces the in-memory store for every test in this file:
+    it clears the Supabase credentials (``supabase_configured`` is a
+    property derived from them, so no other switch is needed) and
+    drops the cached singleton before AND after each test, so no
+    primed store leaks in or out. There is deliberately NO assertion
+    here about a live Supabase database — that belongs in an explicit
+    integration test against a real project, not in this file.
+    """
+    monkeypatch.setattr(settings, "supabase_url", None)
+    monkeypatch.setattr(settings, "supabase_anon_key", None)
+    monkeypatch.setattr(settings, "supabase_service_role_key", None)
+    reset_store_for_tests()
+    yield
+    reset_store_for_tests()
 
 
 def test_health_returns_200_with_component_status() -> None:

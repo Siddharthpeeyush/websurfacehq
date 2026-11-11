@@ -1,11 +1,11 @@
 # Supabase Migrations
 
-**Status:** Week 1 — **four migrations exist** (`0001_core.sql`,
-`0002_billing_teams.sql`, `0003_part7.sql`, `0004_review_fixes.sql`).
-They are **not yet applied anywhere**: no Supabase project exists yet,
-and applying is **BLOCKED** until the owner creates the project in the
-Supabase dashboard (see "How to apply" below). Do not invent a project
-URL, project ref, or keys to "apply" them.
+**Status:** Week 1 — **six migrations exist** (`0001_core.sql`,
+`0002_billing_teams.sql`, `0003_part7.sql`, `0004_review_fixes.sql`,
+`0005_grants.sql`, `0006_policy_cleanup.sql`). Migrations 0001–0004 +
+the seed are already applied live (dashboard SQL editor, 11 Nov 2026);
+`0005_grants.sql` + `0006_policy_cleanup.sql` are new and are applied
+on their own — do NOT re-apply 0001–0004 (see "Applying 0005" below).
 
 > Naming note: this repo uses short sequential names (`0001_core.sql`,
 > …) instead of the `YYYYMMDDHHMMSS_…` timestamp convention originally
@@ -20,6 +20,8 @@ URL, project ref, or keys to "apply" them.
 | `0002_billing_teams.sql` | Billing/teams tables from blueprint §8.2: `subscriptions`, `teams`, `team_members`, `api_keys`, `notifications`, `support_tickets`. `targets` gains nullable `team_id` (plain column + index, no FK). RLS on all six. `is_team_owner()` / `is_team_member()` SECURITY DEFINER helpers for team policies. |
 | `0003_part7.sql` | Part 7 additions (blueprint §9): `attack_paths` table + `findings.reachable`, `findings.reachability_evidence`, `findings.fix_verified_at`, `findings.fix_snippet`. RLS on `attack_paths` via its scan. |
 | `0004_review_fixes.sql` | Week 1 independent-review fixes (11 Nov 2026): `scan_jobs.idempotency_key` column + index (H3); verification-field UPDATE + INSERT triggers + verified-retarget trigger (H4); subscriptions/api_keys user-read-only + server-created tables (scans, findings, scan_jobs, assets, audit_logs, attack_paths) not user-writable (H4); partial unique index for one active scan per user (M4) and one live target per user (M3, round-2). Round-3 (11 Nov 2026): INSERT trigger also blocks `verification_expires_at` / `verification_method`; `attack_paths` added to the server-table REVOKEs. |
+| `0005_grants.sql` | Base GRANTs (live-proof fix F2, 11 Nov 2026): 0001–0004 contained NO grant at all, so tables created in the SQL editor as `postgres` gave every role 42501 "permission denied". Grants full DML to `service_role` on all 13 tables; full DML to `authenticated` only on the five user-writable tables (targets, teams, team_members, notifications, support_tickets); SELECT-only to `authenticated` on the other eight; nothing to `anon`; then re-asserts all eight 0004 REVOKEs AFTER the grants (0004's REVOKEs were no-ops against missing grants). See "Grants (0005)" below and the header comment in the file. |
+| `0006_policy_cleanup.sql` | Policy cleanup (review fix F-L1, 11 Nov 2026): drops the 16 write RLS policies (INSERT/UPDATE/DELETE) on the six server-created tables — scans, findings, scan_jobs, assets, audit_logs (INSERT only; it never had UPDATE/DELETE policies), attack_paths — whose user-write policies survived 0004 even though their writes were revoked. The "policies stay as a second layer" claim was vacuous (no other role exists that the policies would protect: service_role bypasses RLS, postgres owns the tables, anon matches no owner policy), and a future broad re-grant without re-asserted REVOKEs would have re-opened forged writes through them. All SELECT policies are kept. No GRANT/REVOKE changes. See the header comment in the file and "Policy cleanup (0006)" below. |
 
 Seed data lives **outside** this directory: `supabase/seed.sql` +
 `supabase/seed.md` (two tenants, deterministic UUIDs, cross-tenant
@@ -39,6 +41,24 @@ test). The seed is data, not a migration — it is **not** applied by
 - **Separate databases:** staging and production are different Supabase projects with
   different keys. A migration is tested on staging before it touches production.
 
+## Applying 0005 + 0006 (live project already has 0001–0004 + seed)
+
+The project **websurfacehq** exists and 0001 → 0002 → 0003 → 0004 +
+`seed.sql` were applied live via the dashboard SQL editor on
+11 Nov 2026. Apply **only `0005_grants.sql` then
+`0006_policy_cleanup.sql`**, in that order, in the dashboard SQL
+editor, as `postgres` (the same path as the earlier migrations).
+Do NOT re-apply 0001–0004: they are already applied, and re-running
+them would fail (tables/indexes/triggers already exist). `0005` is
+safe to apply on top: GRANT/REVOKE are idempotent, and its REVOKE
+block runs after its GRANT block in the same file, so the final
+state is correct whether or not 0004's REVOKEs ever took effect
+(see the header comment in `0005_grants.sql` for the apply-order
+reasoning). `0006` is safe to apply after it: DROP POLICY IF EXISTS
+is idempotent and touches no grants. After applying both, re-run the
+live proof — the API health check's database component and the
+store's SELECT on `targets` must stop returning 42501.
+
 ## How to apply (BLOCKED — no project yet)
 
 1. Owner creates the Supabase project in the dashboard (Auth enabled,
@@ -47,7 +67,7 @@ test). The seed is data, not a migration — it is **not** applied by
 2. Link the CLI once: `supabase link --project-ref <ref>` (owner's ref).
 3. Apply, staging first, then production:
    ```bash
-   supabase db push            # applies 0001 -> 0002 -> 0003 -> 0004 in order
+   supabase db push            # applies 0001 -> 0002 -> 0003 -> 0004 -> 0005 -> 0006 in order
    ```
    Automatic migrations run *before* new code goes live in CD (playbook rule).
 4. Seed (optional, for the cross-tenant test — see `supabase/seed.md`):
@@ -194,6 +214,52 @@ its tenancy flows through its scan (see RLS summary).
   but `UNIQUE(user_id, domain)` (0001) still blocks re-adding the SAME
   domain after a soft-delete — pre-existing, tracked follow-up.
 
+## Grants (0005)
+
+Base privileges, per table and role (`0005_grants.sql`). RLS
+policies decide *which rows* a role may touch; grants decide
+*whether it may touch the table at all* — Postgres checks the
+grant first, so a missing grant fails with 42501 before any
+policy is evaluated. That is exactly what the live proof hit:
+0001–0004 had no GRANTs, so every role got 42501 on every table.
+
+| Table | service_role | authenticated | anon |
+|---|---|---|---|
+| targets | SELECT, INSERT, UPDATE, DELETE | SELECT, INSERT, UPDATE, DELETE | — |
+| teams | SELECT, INSERT, UPDATE, DELETE | SELECT, INSERT, UPDATE, DELETE | — |
+| team_members | SELECT, INSERT, UPDATE, DELETE | SELECT, INSERT, UPDATE, DELETE | — |
+| notifications | SELECT, INSERT, UPDATE, DELETE | SELECT, INSERT, UPDATE, DELETE | — |
+| support_tickets | SELECT, INSERT, UPDATE, DELETE | SELECT, INSERT, UPDATE, DELETE | — |
+| scans | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| findings | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| scan_jobs | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| assets | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| audit_logs | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| attack_paths | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| subscriptions | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+| api_keys | SELECT, INSERT, UPDATE, DELETE | SELECT only | — |
+
+Notes:
+
+- `authenticated` gets full DML only where the RLS policies
+  allow user writes. The eight SELECT-only tables are the
+  server-created rows (0004 (c2)) and the user-read-only billing
+  tables (0004 (c)); their INSERT/UPDATE/DELETE are revoked from
+  `authenticated` — re-asserted in 0005 after its GRANTs.
+- `anon` gets nothing: no anon SELECT policy exists in 0001–0003
+  (every policy requires `auth.uid()` = the row owner), so there
+  is nothing to grant. The validator asserts anon holds no
+  privilege on all 13 tables.
+- Schema USAGE on `public` is NOT granted in any migration: it is
+  granted to PUBLIC by default in Postgres and Supabase, and the
+  live 42501 hints asked for table grants, never schema USAGE. The
+  validator asserts USAGE holds for all three roles on a fresh
+  database; if that ever fails, add the USAGE grant to 0005 (see
+  its header comment).
+- Verification fields on `targets` are guarded by the 0004
+  triggers, not by grants — a column-level REVOKE is a no-op
+  against a table-level UPDATE grant.
+
 ## Tables (Week 1 — from blueprint §1.4, §8.2, and Part 7)
 
 Core: `targets`, `scans`, `assets`, `findings`, `scan_jobs`, `audit_logs`.
@@ -207,26 +273,81 @@ Part 7 additions: `attack_paths` table, plus `findings.reachable`,
 Seed realistic data for **two separate tenants** and prove user A cannot fetch
 user B's data by changing an id in the URL (cross-tenant test → 404). Seed files live
 outside this directory (`supabase/seed.sql`, documented in
-`supabase/seed.md`) — they are data, not schema. **Status: unapplied**
-(the project exists now — websurfacehq, Singapore — but this VM has no
-DB password / access token, so the parent applies the migrations + seed
-via the dashboard SQL editor; the two auth users must be created first,
-with the exact UUIDs in `seed.sql`).
+`supabase/seed.md`) — they are data, not schema. **Status: applied
+live 11 Nov 2026** (migrations 0001–0004 + seed via the dashboard
+SQL editor; row counts verified — see `supabase/seed.sql` header).
 
 ## Validation
 
-Validation method and result are recorded in the Week 1 schema report
-(the parent agent holds it). In short: the migrations + seed were
-applied to an ephemeral local Postgres (pgserver in a scratch venv,
-auth schema stubbed with `auth.users` + `auth.uid()`), in order
-0001 → 0002 → 0003 → 0004 → seed, and RLS was verified with two roles
-(one per seed tenant). The 0004 validation additionally proves the
-`idempotency_key` column, the one-active-scan index, the verification
-REVOKEs, and the verified-retarget trigger. Latest run (11 Nov 2026,
-after the round-3 fixes): **83/83 checks pass**, including 8
-`has_table_privilege` checks proving the REVOKEs hold against full
-DML pre-granted to `authenticated` (Supabase defaults) before 0004
-applies — the validator previously constructed the SELECT-only state
-itself, so it could not prove the REVOKEs; it can now. If that local run was not
-possible, the report says so explicitly and live-apply stays blocked
-on the project.
+Validator: `supabase/validate_migrations.py` (durable — the Week 1
+83-check run was an ephemeral script that no longer exists, so this
+one is checked in). Run it with a scratch venv; it is NOT part of
+the API and adds no dependency to it:
+
+```bash
+python -m venv /tmp/wshq-validate-venv
+/tmp/wshq-validate-venv/bin/pip install pgserver "psycopg[binary]"
+/tmp/wshq-validate-venv/bin/python supabase/validate_migrations.py
+```
+
+Method (fixed 11 Nov 2026 — the H4 methodology finding): the
+validator starts an ephemeral local Postgres (pgserver), creates
+ONLY the stubs Supabase itself provides (roles `anon` /
+`authenticated` / `service_role` — `service_role` with BYPASSRLS,
+as in real Supabase — plus the `auth` schema with `auth.users` and
+an `auth.uid()` stub reading the `app.test_uid` session setting),
+then applies 0001 → 0002 → 0003 → 0004 → 0005 → 0006 + seed in order,
+with **NO pre-grant of any kind** — the only grants in the
+database are the ones the migrations issue. It then asserts, per
+table x role x privilege with `has_table_privilege`, that grants
+are PRESENT where the design requires them (0005) AND the 0004
+REVOKEs hold, and proves the same behaviourally: real
+INSERT/UPDATE/DELETE attempts as `authenticated` fail with 42501
+on the eight read-only tables and succeed on the five
+user-writable ones, `authenticated` SELECTs return the owner's own
+seed rows, `service_role` does full DML, the H4 triggers still
+fire, cross-tenant reads return zero rows, soft-delete/restore
+work, and the M3/M4 partial unique indexes still reject. It also
+asserts the 0006 policy cleanup (G16): the six server-created
+tables keep ONLY their SELECT policy (16 write policies dropped,
+audit_logs INSERT-only), and the 0006 file drops exactly those 16
+and no SELECT policy.
+
+Why no pre-grant: the old validator pre-granted full DML to
+`authenticated` before applying 0004, so it proved the REVOKEs
+hold GIVEN grants — but it was blind to MISSING grants, and the
+live proof then failed exactly there (zero GRANTs in 0001–0004,
+42501 for every role on every table). A validator that CONSTRUCTS
+the expected privilege state cannot prove a GRANT exists. This one
+constructs nothing about privileges: if a migration forgets a
+grant, a check fails. Control run: with 0005 + 0006 removed from
+the apply list (`--exclude 0005_grants.sql 0006_policy_cleanup.sql`,
+the pre-fix state) the validator reports **152/278, 126 failed** —
+the harness catches the live bug (missing grants + surviving write
+policies). With 0005 + 0006, latest run (11 Nov 2026): **278/278
+checks pass, 0 failed**.
+
+What this does NOT prove: the live Supabase project, Auth users,
+`supabase db push`, or the PostgREST/JWT path — those need the
+real project (the parent's live re-run after applying 0005). It
+proves the SQL: the migrations, applied in order to a fresh
+database, produce exactly the privilege state the RLS design
+assumes.
+
+The earlier 83/83 run (11 Nov 2026, round-3 fixes, pre-grant
+methodology) is superseded by the 278/278 run above — same RLS /
+trigger / index coverage, plus the grant-presence proof it lacked
+and the 0006 policy-cleanup proof.
+
+## Policy cleanup (0006)
+
+`0006_policy_cleanup.sql` drops the write RLS policies on the six
+server-created tables (scans, findings, scan_jobs, assets,
+audit_logs, attack_paths): 16 policies in total — INSERT/UPDATE/
+DELETE on five tables, INSERT only on `audit_logs` (it never had
+UPDATE/DELETE policies). Every SELECT policy is kept, so users
+still read their own rows. The REVOKE is now the single barrier
+for `authenticated` writes on those tables, matching subscriptions
++ api_keys (whose write policies 0004 dropped in the same change
+that revoked them). The validator's G16 group asserts exactly one
+policy (SELECT) remains per table on a fresh DB.

@@ -36,11 +36,13 @@ class Settings(BaseSettings):
     # Project URL + keys. The project does not exist yet (owner creates it in
     # the dashboard, Week 1). The service-role key is server-only: it must
     # NEVER appear in frontend code, the frontend bundle, or any committed
-    # file. SUPABASE_JWT_SECRET verifies Supabase JWTs in the API.
+    # file. Supabase JWTs are verified ES256 against the project's public
+    # JWKS (see app/auth/jwt.py) — there is NO shared JWT secret: the
+    # legacy SUPABASE_JWT_SECRET was removed (ADR-0007) and must not be
+    # reintroduced as a verification fallback.
     supabase_url: str | None = None
     supabase_anon_key: str | None = None
     supabase_service_role_key: SecretStr | None = None
-    supabase_jwt_secret: SecretStr | None = None
 
     # --- API ----------------------------------------------------------------
     api_host: str = "0.0.0.0"
@@ -101,13 +103,13 @@ class Settings(BaseSettings):
 
     @property
     def supabase_configured(self) -> bool:
-        """True when the Supabase project is wired in (URL + both keys)."""
-        return bool(
-            self.supabase_url
-            and self.supabase_anon_key
-            and self.supabase_service_role_key
-            and self.supabase_jwt_secret
-        )
+        """True when the Supabase project is wired in (URL + both keys).
+
+        The JWT secret is deliberately NOT part of this check (ADR-0007):
+        tokens are verified ES256 against the project's public JWKS, so
+        auth needs the URL (which locates the JWKS), not a shared secret.
+        """
+        return bool(self.supabase_url and self.supabase_anon_key and self.supabase_service_role_key)
 
     @model_validator(mode="after")
     def _require_prod_secrets(self) -> "Settings":
@@ -122,7 +124,6 @@ class Settings(BaseSettings):
                 ("SUPABASE_URL", self.supabase_url),
                 ("SUPABASE_ANON_KEY", self.supabase_anon_key),
                 ("SUPABASE_SERVICE_ROLE_KEY", self.supabase_service_role_key),
-                ("SUPABASE_JWT_SECRET", self.supabase_jwt_secret),
                 ("INTERNAL_SIGNING_SECRET", self.internal_signing_secret),
             )
             if not value

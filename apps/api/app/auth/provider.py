@@ -17,17 +17,20 @@ tests construct the app with a fake provider, production never sees one.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
 from gotrue.errors import AuthApiError
-from supabase import Client, create_client
+from supabase import Client
 
 from app.core.config import Settings, settings
 from app.core.errors import ApiError
-from app.core.logging import logger
+from app.core.http import create_supabase_client as create_client
+from app.core.http import proxy_safe_httpx_client
+from app.core.logging import logger, redact_text
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,42 @@ def _bad_gateway() -> ApiError:
     return ApiError(502, "BAD_GATEWAY", "Authentication service unavailable")
 
 
+# --- Upstream-error logging (live-proof fix F4) ---------------------------
+# GoTrue failures were logged with the status only, so the 502 root cause
+# could not be diagnosed from the logs. The helpers below log the status,
+# the machine-readable error code and a truncated, sanitized message —
+# never tokens, passwords, or full JWTs (the logging layer redacts
+# ``key=value`` fragments as well; this is defence in depth at the call
+# site). The 502 root cause itself stays unproven until the re-proof:
+# nothing here guesses it.
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
+_MAX_AUTH_ERROR_CHARS = 200
+
+
+def _sanitize_auth_message(message: str | None) -> str:
+    """Truncate + redact an upstream auth error message for logging."""
+    text = message or ""
+    text = _JWT_RE.sub("[REDACTED]", text)
+    text = redact_text(text)
+    return text[:_MAX_AUTH_ERROR_CHARS]
+
+
+def _log_auth_error(operation: str, exc: AuthApiError) -> None:
+    """Log a GoTrue failure at warning level, redacted.
+
+    Fields: HTTP status, machine-readable ``error_code`` (e.g.
+    ``over_email_send_rate_limit``), and the truncated sanitized message.
+    """
+    logger.warning(
+        f"supabase {operation} failed",
+        extra={
+            "status": exc.status,
+            "error_code": getattr(exc, "code", None) or "unknown",
+            "error": _sanitize_auth_message(exc.message),
+        },
+    )
+
+
 class SupabaseAuthProvider:
     """Real provider: Supabase Auth (GoTrue) via supabase-py + REST."""
 
@@ -93,6 +132,13 @@ class SupabaseAuthProvider:
             # configured check above guarantees it.
             url = self._settings.supabase_url or ""
             key = self._settings.supabase_anon_key or ""
+            # NOTE: the module-level ``create_client`` name is the
+            # proxy-safe wrapper (app.core.http.create_supabase_client),
+            # NOT supabase.create_client directly — it injects a
+            # trust_env=False httpx client via SyncClientOptions (live-proof
+            # fix F1: the VM's bracketed no_proxy entries make a plain
+            # httpx.Client() raise InvalidURL). The name is kept so tests
+            # can still patch ``app.auth.provider.create_client``.
             self._client = create_client(url, key)
         return self._client
 
@@ -109,6 +155,11 @@ class SupabaseAuthProvider:
         "existing account", or it becomes an email-enumeration oracle
         (threat-model §3.1). Returning ``None`` here is the honest signal
         for "no new account was created" without leaking it to the client.
+
+        Test practice: live signup tests must use valid-domain throwaway
+        emails (e.g. ``@websurfacehq.com``) — pydantic rejects the
+        ``.invalid`` TLD by design (422 VALIDATION_ERROR, working as
+        intended), so ``.invalid`` addresses can never reach GoTrue.
         """
         client = self._get_client()
         try:
@@ -127,7 +178,7 @@ class SupabaseAuthProvider:
             ):
                 logger.info("sign_up for an already-registered email")
                 return None
-            logger.warning("supabase sign_up failed", extra={"status": exc.status})
+            _log_auth_error("sign_up", exc)
             raise _bad_gateway() from exc
         if response.user is None:
             raise _bad_gateway()
@@ -144,7 +195,7 @@ class SupabaseAuthProvider:
                 raise ApiError(429, "RATE_LIMITED", "Too many attempts. Try again later.") from exc
             if exc.status in (400, 401, 422):
                 raise ApiError(401, "UNAUTHORIZED", "Invalid email or password") from exc
-            logger.warning("supabase sign_in failed", extra={"status": exc.status})
+            _log_auth_error("sign_in", exc)
             raise _bad_gateway() from exc
         if response.session is None or response.user is None:
             raise ApiError(401, "UNAUTHORIZED", "Invalid email or password")
@@ -167,24 +218,34 @@ class SupabaseAuthProvider:
         url = (self._settings.supabase_url or "").rstrip("/") + "/auth/v1/logout"
         anon_key = self._settings.supabase_anon_key or ""
         try:
-            response = httpx.post(
-                url,
-                headers={
-                    "apikey": anon_key,
-                    "Authorization": f"Bearer {access_token}",
-                },
-                timeout=5.0,
-                # Same as safe_get (app/core/ssrf.py): direct fetch, never
-                # via a proxy from the environment (round-2 review finding).
-                trust_env=False,
-            )
+            # Shared proxy-safe client (app/core/http.py): ignores the
+            # malformed proxy env for parsing, re-applies the operator's
+            # explicit proxy + CA when configured (required for VM egress;
+            # a bare trust_env=False client cannot connect from this VM).
+            with proxy_safe_httpx_client(timeout=5.0) as client:
+                response = client.post(
+                    url,
+                    headers={
+                        "apikey": anon_key,
+                        "Authorization": f"Bearer {access_token}",
+                    },
+                )
         except httpx.HTTPError as exc:
-            logger.warning("supabase sign_out transport error")
+            logger.warning(
+                "supabase sign_out transport error",
+                extra={"error_type": type(exc).__name__},
+            )
             raise _bad_gateway() from exc
         if response.status_code in (401, 404):
             return
         if response.status_code >= 400:
-            logger.warning("supabase sign_out failed", extra={"status": response.status_code})
+            logger.warning(
+                "supabase sign_out failed",
+                extra={
+                    "status": response.status_code,
+                    "error": _sanitize_auth_message(response.text),
+                },
+            )
             raise _bad_gateway()
 
     def reset_password(self, email: str) -> None:
@@ -207,7 +268,7 @@ class SupabaseAuthProvider:
                 # Unknown email (provider-dependent): no enumeration.
                 logger.info("reset requested for an unknown email")
                 return
-            logger.warning("supabase reset_password failed", extra={"status": exc.status})
+            _log_auth_error("reset_password", exc)
             raise _bad_gateway() from exc
 
     def exchange_code(self, code: str) -> AuthSession:

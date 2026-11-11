@@ -8,6 +8,7 @@ pydantic==2.14.3
 pydantic-settings==2.16.2
 httpx==0.28.1
 PyJWT==2.15.0
+cryptography==50.0.2
 supabase==2.18.0
 gotrue==2.12.3
 redis==5.2.1

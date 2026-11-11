@@ -30,13 +30,28 @@ from starlette.responses import Response
 from app.core.config import Environment, settings
 from app.core.errors import ApiError, ErrorResponse
 from app.core.health import health_payload
+from app.core.http import sanitize_no_proxy_env
 from app.core.logging import configure_logging, logger, request_id_var
 from app.routers import auth as auth_router
 from app.routers import findings as findings_router
 from app.routers import scans as scans_router
 from app.routers import targets as targets_router
 
+# Live-proof fix F1(b): strip bracketed IPv6 entries (e.g. [::1]) from
+# NO_PROXY/no_proxy at launch, BEFORE any Supabase client is constructed:
+# httpx turns "[::1]" into an invalid proxy mount and raises InvalidURL
+# inside supabase.create_client. Other entries and http(s)_proxy are
+# untouched. Idempotent; also re-run inside create_supabase_client for
+# entry points that never import this module (workers, tests).
+_removed_no_proxy_entries = sanitize_no_proxy_env()
+
 configure_logging(logging.INFO)
+
+if _removed_no_proxy_entries:
+    logger.warning(
+        "sanitized bracketed entries from NO_PROXY/no_proxy at launch",
+        extra={"removed": _removed_no_proxy_entries},
+    )
 
 # Security headers applied to every response. Values are deliberately
 # restrictive for an API that serves no browser-rendered content.

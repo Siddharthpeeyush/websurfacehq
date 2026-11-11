@@ -25,7 +25,6 @@ def _configured_settings() -> Settings:
         supabase_url="https://example.supabase.co",
         supabase_anon_key="anon-key",
         supabase_service_role_key=SecretStr("service-key"),
-        supabase_jwt_secret=SecretStr("jwt-secret"),
     )
 
 

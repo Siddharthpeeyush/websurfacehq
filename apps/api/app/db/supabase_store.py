@@ -76,7 +76,14 @@ class SupabaseStore:
                 "SUPABASE_NOT_CONFIGURED",
                 "Supabase is not configured for this environment",
             )
-        from supabase import create_client
+        # NOTE: the local ``create_client`` name is the proxy-safe wrapper
+        # (app.core.http.create_supabase_client), NOT supabase.create_client
+        # directly — it injects a trust_env=False httpx client via
+        # SyncClientOptions (live-proof fix F1: the VM's bracketed no_proxy
+        # entries make a plain httpx.Client() raise InvalidURL). Imported
+        # lazily here so tests patching ``supabase.create_client`` still
+        # intercept (the wrapper resolves that binding at call time).
+        from app.core.http import create_supabase_client as create_client
 
         service_key = cfg.supabase_service_role_key
         assert service_key is not None  # guaranteed by supabase_configured

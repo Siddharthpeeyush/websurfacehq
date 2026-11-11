@@ -33,14 +33,23 @@
 -- > Users > Add user) or the Auth Admin API, with EXACTLY the UUIDs
 -- above — otherwise every INSERT below fails on the auth.users FK.
 -- APPLIED live 11 Nov 2026: migrations 0001–0004 + seed applied via
--- the dashboard SQL editor; all 13 tables exist; row counts verified
--- (targets 2, scans 2, assets 4, findings 4, scan_jobs 2, audit_logs 2,
--- subscriptions 2, teams 1, team_members 1, api_keys 2, notifications 2,
--- support_tickets 2, attack_paths 2). See supabase/seed.md.
+-- the dashboard SQL editor as postgres; all 13 tables exist; row counts
+-- verified via the SQL editor (targets 2, scans 2, assets 4, findings 4,
+-- scan_jobs 2, audit_logs 2, subscriptions 2, teams 1, team_members 1,
+-- api_keys 2, notifications 2, support_tickets 2, attack_paths 2).
+-- CAVEAT (live proof, 11 Nov 2026): those counts were verified as postgres,
+-- which bypasses RLS and grants — they were NOT verifiable via REST/API.
+-- All REST reads returned 403/42501 (missing GRANTs, live-proof blocker F2;
+-- see docs/live-proof-evidence-2026-11-11.md). Counts do not prove API
+-- readability. 0005 grants + 0006 policy-cleanup migrations are pending
+-- and NOT applied.
+-- See supabase/seed.md.
 --
 -- Apply as a role that bypasses RLS (postgres / service_role via
--- psql), AFTER `supabase db push` (0001 -> 0002 -> 0003):
+-- psql), AFTER `supabase db push` (0001 -> 0002 -> 0003 -> 0004 -> 0005 -> 0006):
 --   psql "$DATABASE_URL" -f supabase/seed.sql
+-- (0005 grants + 0006 policy-cleanup migrations are pending — not applied;
+-- see supabase/seed.md.)
 -- Inserts are ON CONFLICT (id) DO NOTHING, so re-running the seed is
 -- safe. Verification-token / API-key hashes below are the real
 -- SHA-256 hex of the documented seed secrets. The RAW secret values
