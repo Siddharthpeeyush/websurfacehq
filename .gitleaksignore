@@ -1,0 +1,21 @@
+# .gitleaksignore — pinned historical findings, NOT a pattern allowlist.
+#
+# Each line is one exact fingerprint (commit:file:rule:line) from a
+# superseded commit. A fingerprint can never suppress a NEW finding:
+# any secret introduced by a future commit has a different commit SHA
+# and is still scanned by the full default rules.
+#
+# The three entries below are FAKE test fixtures (a pretend PEM header,
+# a pretend key assignment, a made-up API key string) introduced by
+# commit d2aa9c21 (the Week 2 snapshot push). No real secret was ever
+# involved. The literals were removed from HEAD by commit 71ff161b
+# (fixtures are now built at runtime, values unchanged), but the CI
+# secrets job scans the whole PR commit range, so the old commit's
+# findings still report until the PR is merged. These fingerprints
+# silence exactly those three historical findings, nothing else.
+#
+# Do NOT add fingerprints for real secrets. A real secret means: rotate
+# it first, then rewrite history. See AGENTS.md "CI PR #1" entries.
+d2aa9c21c497aed070ee77535288264fd0c590a7:apps/api/tests/test_js_secrets.py:generic-api-key:262
+d2aa9c21c497aed070ee77535288264fd0c590a7:apps/api/tests/test_js_secrets.py:private-key:195
+d2aa9c21c497aed070ee77535288264fd0c590a7:apps/api/tests/test_recon.py:generic-api-key:57
