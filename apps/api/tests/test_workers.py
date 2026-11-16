@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 from celery.utils.time import get_exponential_backoff_interval  # type: ignore[import-untyped]
 
@@ -149,9 +150,21 @@ def test_pipeline_has_all_13_stages_in_order() -> None:
     ]
 
 
-def test_pipeline_only_verify_target_implemented_in_week_1() -> None:
+def test_pipeline_week_2_recon_stages_implemented() -> None:
+    # Week 2 flips the seven recon stages to implemented=True as they
+    # land (app.workers.tasks); nuclei_scan and the Week 3/4 stages stay
+    # unimplemented. (Was: only verify_target, in Week 1.)
     implemented = [s.stage for s in SCAN_PIPELINE if s.implemented]
-    assert implemented == ["verify_target"]
+    assert implemented == [
+        "verify_target",
+        "dns_enum",
+        "subdomain_enum",
+        "port_scan",
+        "http_probe",
+        "tech_fingerprint",
+        "crawl",
+        "js_secret_scan",
+    ]
 
 
 def test_pipeline_queues_match_architecture() -> None:
@@ -286,6 +299,28 @@ def test_verify_target_accepts_verified_target(
         return True
 
     monkeypatch.setattr("app.workers.tasks._recheck_verification", _fake_recheck)
+    # B2 chaining: a successful verify starts the recon chain in eager
+    # mode, so the runner + robots fetch are stubbed for the chained
+    # stages (empty outcomes — this test's point is the verify step).
+    monkeypatch.setattr(
+        "app.workers.tasks.run_stage",
+        lambda stage, domain, **kw: {
+            "stage": stage,
+            "domain": domain,
+            "results": [],
+            "logs": [],
+            "counts": {
+                "results": 0,
+                "logs": 0,
+                "errors": 0,
+                "malformed_lines": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.pinned_get",
+        lambda url, timeout=10.0, max_bytes=65536: httpx.Response(200, content=b""),
+    )
 
     result = verify_target.apply_async(args=[scan_id, user_id]).get()
 
@@ -373,6 +408,28 @@ def test_dispatch_scan_twice_creates_no_duplicates(
         return True
 
     monkeypatch.setattr("app.workers.tasks._recheck_verification", _fake_recheck)
+    # B2 chaining: dispatch enqueues verify_target, which in eager
+    # mode runs the whole chain synchronously — stub the runner +
+    # robots fetch so the chain completes with empty outcomes.
+    monkeypatch.setattr(
+        "app.workers.tasks.run_stage",
+        lambda stage, domain, **kw: {
+            "stage": stage,
+            "domain": domain,
+            "results": [],
+            "logs": [],
+            "counts": {
+                "results": 0,
+                "logs": 0,
+                "errors": 0,
+                "malformed_lines": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.pinned_get",
+        lambda url, timeout=10.0, max_bytes=65536: httpx.Response(200, content=b""),
+    )
     user_uuid = UUID(user_id)
 
     first = dispatch_scan(scan_id, user_id)
@@ -380,17 +437,22 @@ def test_dispatch_scan_twice_creates_no_duplicates(
     assert first["task_id"] == (f"{scan_id}:verify_target:{target_hash_for('example.com')}")
     assert len(first["stages"]) == len(SCAN_PIPELINE)
     assert {s["stage"] for s in first["stages"]} == {s.stage for s in SCAN_PIPELINE}
-    # Only verify_target ran (eager); every other stage is a queued row.
+    # B2 chaining: verify_target ran (eager) and the chain drove every
+    # implemented stage to done; the unimplemented stages stay queued
+    # rows (the chain ends at js_secret_scan).
     key = idempotency_key(scan_id, "verify_target", "example.com")
     verify_job = store.get_scan_job_by_key(user_uuid, key)
     assert verify_job is not None and verify_job.status == "done"
     for stage in SCAN_PIPELINE:
-        if stage.stage != "verify_target":
-            row = store.get_scan_job_by_key(
-                user_uuid,
-                idempotency_key(scan_id, stage.stage, "example.com"),
-            )
-            assert row is not None and row.status == "queued"
+        row = store.get_scan_job_by_key(
+            user_uuid,
+            idempotency_key(scan_id, stage.stage, "example.com"),
+        )
+        assert row is not None
+        if stage.implemented:
+            assert row.status == "done", stage.stage
+        else:
+            assert row.status == "queued", stage.stage
     reloaded_scan = store.get_scan(user_uuid, UUID(scan_id))
     assert reloaded_scan is not None and reloaded_scan.status == "recon"
 

@@ -1,0 +1,14 @@
+=== gofmt -l . ===
+(empty = clean)
+=== go vet ./... ===
+=== go test -count=1 ./... ===
+ok  	websurfacehq/scanner-agent/cmd/scanner-agent	0.024s
+ok  	websurfacehq/scanner-agent/internal/agent	0.070s
+ok  	websurfacehq/scanner-agent/internal/dnsenum	0.009s
+ok  	websurfacehq/scanner-agent/internal/parsers	0.059s
+ok  	websurfacehq/scanner-agent/internal/runner	0.670s
+ok  	websurfacehq/scanner-agent/internal/ssrf	0.004s
+=== go test -count=1 -v ./... PASS count ===
+62
+=== go test -count=1 -v ./... FAIL count ===
+0

@@ -12,6 +12,15 @@ scan's work (called by the API layer, which has the authenticated
 3. Enqueue ONLY ``verify_target`` (Week 1), with task id
    ``scan_id:verify_target:target_hash`` on the ``recon`` queue.
 
+Dispatch enqueues NOTHING else: the rest of the pipeline is driven by
+chaining (B2 review fix) — each stage, on a fresh successful run,
+enqueues the next stage via ``app.workers.tasks._enqueue_next_stage``
+(``verify_target`` → ``dns_enum`` → ``subdomain_enum`` → ``port_scan``
+→ ``http_probe`` → ``tech_fingerprint`` → ``crawl`` →
+``js_secret_scan``), with the next stage's idempotency key as its task
+id. A cached re-run returns before the task body, so it never
+re-enqueues; a refusal enqueues nothing.
+
 Idempotent: calling it twice for the same scan creates no duplicate job
 rows and enqueues no duplicate task — existing rows are checked first
 (the store's ``create_scan_job`` does NOT dedupe, so this check is the

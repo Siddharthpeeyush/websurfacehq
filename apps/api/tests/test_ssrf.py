@@ -111,6 +111,14 @@ def test_check_resolved_ips_direct() -> None:
         ["fe80::1"],
         ["::1"],
         ["::ffff:127.0.0.1"],
+        # M8 parity fix (16 Nov 2026): ranges ip.is_global wrongly
+        # reports as global — must be blocked explicitly, as in Go.
+        ["::127.0.0.1"],  # IPv4-compatible IPv6; passed both guards before
+        ["2001:db8::1"],
+        ["2001:2::1"],
+        ["2001:10::1"],
+        ["100::1"],
+        ["2001::1"],  # Teredo; blocked explicitly for parity with Go (R3)
         ["not-an-ip"],
     ]:
         with pytest.raises(UnsafeUrlError):
