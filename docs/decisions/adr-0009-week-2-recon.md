@@ -2,8 +2,8 @@
 
 **Status:** Accepted (build complete on branch `week-2-recon`, 16 Nov 2026;
 independent security review verdict recorded in §8; live smoke test still
-open — see §7). No push to GitHub in this run (owner approval taps
-required); everything stays on branch `week-2-recon`.
+open — see §7). Pushed to GitHub 16 Nov 2026 (commit `d2aa9c21`,
+owner-approved) on branch `week-2-recon`.
 
 ## Context
 
