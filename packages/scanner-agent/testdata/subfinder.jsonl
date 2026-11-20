@@ -1,0 +1,7 @@
+{"host":"www.example.com","source":"crtsh"}
+{"host":"api.example.com","source":"dnsdumpster"}
+{"host":"www.example.com","source":"crtsh"}
+{"host":"mail.example.com","source":"virustotal"}
+{"host":"EXAMPLE.com","source":"crtsh"}
+this is not json and must be skipped
+{"host":"","source":"crtsh"}

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 
 from app.db.memory import InMemoryStore
@@ -102,6 +103,28 @@ def test_run_twice_same_task_id_returns_stored_result(
         return True
 
     monkeypatch.setattr("app.workers.tasks._recheck_verification", _fake_recheck)
+    # B2 chaining: a successful verify starts the recon chain in eager
+    # mode, so the runner + robots fetch are stubbed for the chained
+    # stages (empty outcomes — this test's point is verify idempotency).
+    monkeypatch.setattr(
+        "app.workers.tasks.run_stage",
+        lambda stage, domain, **kw: {
+            "stage": stage,
+            "domain": domain,
+            "results": [],
+            "logs": [],
+            "counts": {
+                "results": 0,
+                "logs": 0,
+                "errors": 0,
+                "malformed_lines": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.pinned_get",
+        lambda url, timeout=10.0, max_bytes=65536: httpx.Response(200, content=b""),
+    )
     task_id = idempotency_key(scan_id, "verify_target", "example.com")
     assert task_id == f"{scan_id}:verify_target:{target_hash_for('example.com')}"
 
@@ -115,14 +138,16 @@ def test_run_twice_same_task_id_returns_stored_result(
     # The live verification re-check ran exactly once: no duplicate
     # side effects on the second delivery.
     assert check_calls == ["example.com"]
-    # Exactly one job row, done, holding the stored result.
+    # Exactly one job row for verify_target, done, holding the stored
+    # result — plus one row per chained recon stage (B2: the fresh
+    # verify drove the whole chain in eager mode).
     user_uuid = UUID(user_id)
     job = store.get_scan_job_by_key(user_uuid, task_id)
     assert job is not None
     assert job.status == "done"
     assert job.celery_task_id == task_id
     assert job.log is not None and '"verified"' in job.log
-    assert len(store._scan_jobs) == 1
+    assert len(store._scan_jobs) == 8  # verify_target + 7 recon stages
 
 
 def test_run_twice_same_task_id_for_refusal_is_also_idempotent(

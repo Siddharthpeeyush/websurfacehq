@@ -1,0 +1,5 @@
+{"timestamp":"2026-11-16T09:00:00Z","request":{"method":"GET","url":"https://example.com/","endpoint":"https://example.com/","tag":"a","attribute":"href","source":"https://example.com/"},"response":{"status_code":200,"technologies":["Nginx"],"headers":{},"content_length":1256}}
+{"timestamp":"2026-11-16T09:00:01Z","request":{"method":"GET","url":"https://example.com/app.js?v=2","endpoint":"https://example.com/app.js?v=2","tag":"script","attribute":"src","source":"https://example.com/"},"response":{"status_code":200,"technologies":[],"headers":{},"content_length":9000}}
+{"timestamp":"2026-11-16T09:00:02Z","request":{"method":"GET","url":"","endpoint":"https://example.com/style.css","tag":"link","attribute":"href","source":"https://example.com/"},"response":{"status_code":200,"technologies":[],"headers":{},"content_length":100}}
+{"timestamp":"2026-11-16T09:00:03Z","request":{"method":"POST","url":"https://example.com/api/login","endpoint":"https://example.com/api/login","tag":"form","attribute":"action","source":"https://example.com/"},"response":{"status_code":200,"technologies":[],"headers":{},"content_length":50}}
+not json

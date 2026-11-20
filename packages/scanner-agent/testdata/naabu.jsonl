@@ -1,0 +1,5 @@
+{"host":"example.com","ip":"93.184.216.34","port":80,"protocol":"tcp"}
+{"host":"example.com","ip":"93.184.216.34","port":443,"protocol":"tcp"}
+{"host":"example.com","ip":"93.184.216.34","port":99999,"protocol":"tcp"}
+{"host":"","ip":"","port":22,"protocol":"tcp"}
+not json at all

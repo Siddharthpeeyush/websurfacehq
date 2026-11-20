@@ -1,0 +1,5 @@
+[
+  {"issuer_ca_id": 12345, "issuer_name": "C=US, O=Fake CA, CN=Fake CA", "common_name": "example.com", "name_value": "example.com\nwww.example.com", "id": 1, "entry_timestamp": "2026-01-01T00:00:00", "not_before": "2026-01-01T00:00:00", "not_after": "2027-01-01T00:00:00", "serial_number": "00aa"},
+  {"issuer_ca_id": 12345, "issuer_name": "C=US, O=Fake CA, CN=Fake CA", "common_name": "*.example.com", "name_value": "*.example.com\napi.example.com", "id": 2, "entry_timestamp": "2026-02-01T00:00:00", "not_before": "2026-02-01T00:00:00", "not_after": "2027-02-01T00:00:00", "serial_number": "00bb"},
+  {"issuer_ca_id": 99999, "issuer_name": "C=US, O=Other CA, CN=Other", "common_name": "unrelated.org", "name_value": "unrelated.org", "id": 3, "entry_timestamp": "2026-03-01T00:00:00", "not_before": "2026-03-01T00:00:00", "not_after": "2027-03-01T00:00:00", "serial_number": "00cc"}
+]

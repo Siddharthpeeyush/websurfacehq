@@ -11,6 +11,10 @@ Blocked, before any connection is attempted:
 - IPv6 private / special ranges: ``fc00::/7`` (unique-local), ``fe80::/10``
   (link-local), ``::1`` (loopback), ``::`` (unspecified) — the blueprint
   lists IPv4 only; the IPv6 gap is closed here per threat-model §3.4.
+  Plus the explicit ``_BLOCKED_NETWORKS`` list (``::/96``,
+  ``2001:db8::/32``, ``2001:2::/48``, ``2001:10::/28``, ``100::/64``):
+  ranges ``ip.is_global`` wrongly reports as global (M8 fix, 16 Nov
+  2026; the Go agent carries the same list).
 - DNS rebinding: the hostname is resolved TWICE and both resolutions are
   checked; a second resolution that introduces a private IP is rejected.
 
@@ -40,6 +44,27 @@ BLOCKED_HOST_SUFFIXES: tuple[str, ...] = (
 )
 BLOCKED_HOSTS: frozenset[str] = frozenset({"localhost", "metadata.google.internal"})
 
+# Explicitly blocked networks that ``ipaddress`` wrongly reports as
+# global (``ip.is_global`` is True for them — same parity gap the Go
+# agent's M8 fix closed on its side, 16 Nov 2026; the two lists must
+# stay in sync):
+# - ``::/96`` — IPv4-compatible IPv6 (RFC 4291): covers ``::127.0.0.1``,
+#   which passed BOTH guards before this fix.
+# - ``2001:db8::/32`` documentation, ``2001:2::/48`` benchmarking,
+#   ``2001:10::/28`` ORCHID, ``100::/64`` discard — all unroutable.
+# Teredo ``2001::/32`` is listed explicitly for parity with the Go
+# agent (re-review R3, 16 Nov 2026): Python's ``is_global`` is already
+# False for it, but Go's ``IsGlobalUnicast`` is True, so the Go guard
+# needs the explicit prefix — and the two lists stay in sync.
+_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("::/96"),
+    ipaddress.ip_network("2001:db8::/32"),
+    ipaddress.ip_network("2001:2::/48"),
+    ipaddress.ip_network("2001:10::/28"),
+    ipaddress.ip_network("100::/64"),
+    ipaddress.ip_network("2001::/32"),
+)
+
 
 class UnsafeUrlError(ValueError):
     """Raised when a URL fails the SSRF checks. The message names the
@@ -62,12 +87,18 @@ def check_resolved_ips(ips: list[str]) -> None:
     ``is_global`` is False for private, loopback, link-local, reserved,
     multicast and unspecified addresses — exactly the set that must never
     be fetched. Raises :class:`UnsafeUrlError` naming the offending IP.
+
+    Plus the explicit :data:`_BLOCKED_NETWORKS` list: ranges
+    ``is_global`` wrongly reports as global (``::/96`` incl.
+    ``::127.0.0.1``, documentation / benchmarking / ORCHID / discard).
     """
     for raw in ips:
         try:
             ip = _unwrap_ip(raw)
         except ValueError as exc:
             raise UnsafeUrlError(f"Unparseable resolved IP: {raw!r}") from exc
+        if any(ip.version == network.version and ip in network for network in _BLOCKED_NETWORKS):
+            raise UnsafeUrlError(f"Resolved IP {raw} is in a blocked range ({ip})")
         if not ip.is_global:
             raise UnsafeUrlError(f"Resolved IP {raw} is not a public address ({ip})")
 

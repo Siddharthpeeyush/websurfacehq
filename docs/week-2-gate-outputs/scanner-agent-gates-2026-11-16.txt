@@ -1,0 +1,118 @@
+=== go version ===
+go version go1.27.4 linux/amd64
+
+=== gofmt -l . ===
+(empty = clean)
+
+=== go vet ./... ===
+vet exit: 0
+
+=== go test ./... -v (tail) ===
+=== RUN   TestCLI_SubdomainEnumEndToEnd
+--- PASS: TestCLI_SubdomainEnumEndToEnd (0.04s)
+=== RUN   TestCLI_BadJSON
+--- PASS: TestCLI_BadJSON (0.00s)
+=== RUN   TestCLI_UnknownFieldIgnored
+--- PASS: TestCLI_UnknownFieldIgnored (0.00s)
+=== RUN   TestCLI_TrailingDataRejected
+--- PASS: TestCLI_TrailingDataRejected (0.00s)
+=== RUN   TestCLI_EmptyStdin
+--- PASS: TestCLI_EmptyStdin (0.00s)
+PASS
+ok  	websurfacehq/scanner-agent/cmd/scanner-agent	0.051s
+=== RUN   TestSubdomainEnum_FakeTool
+--- PASS: TestSubdomainEnum_FakeTool (0.00s)
+=== RUN   TestPortScan_FakeTool
+--- PASS: TestPortScan_FakeTool (0.00s)
+=== RUN   TestPortScan_MaxPortsAll
+--- PASS: TestPortScan_MaxPortsAll (0.00s)
+=== RUN   TestPortScan_BadMaxPorts
+--- PASS: TestPortScan_BadMaxPorts (0.00s)
+=== RUN   TestHTTPProbe_FakeTool
+--- PASS: TestHTTPProbe_FakeTool (0.00s)
+=== RUN   TestHTTPProbe_ScreenshotUnavailable
+--- PASS: TestHTTPProbe_ScreenshotUnavailable (0.00s)
+=== RUN   TestCrawl_FakeTool
+--- PASS: TestCrawl_FakeTool (0.00s)
+=== RUN   TestDNSEnum_FakeHTTP
+--- PASS: TestDNSEnum_FakeHTTP (0.04s)
+=== RUN   TestSSRFRefusal_BeforeExec
+--- PASS: TestSSRFRefusal_BeforeExec (0.00s)
+=== RUN   TestSSRFRefusal_PrivateIPLiteral
+--- PASS: TestSSRFRefusal_PrivateIPLiteral (0.00s)
+=== RUN   TestUnknownStage
+--- PASS: TestUnknownStage (0.00s)
+=== RUN   TestMissingDomain
+--- PASS: TestMissingDomain (0.00s)
+=== RUN   TestMissingTool
+--- PASS: TestMissingTool (0.00s)
+=== RUN   TestRateLimitClamped
+--- PASS: TestRateLimitClamped (0.00s)
+=== RUN   TestOutputIsPureJSONL
+--- PASS: TestOutputIsPureJSONL (0.00s)
+PASS
+ok  	websurfacehq/scanner-agent/internal/agent	0.046s
+=== RUN   TestFetchCRT_ParsesFixture
+--- PASS: TestFetchCRT_ParsesFixture (0.00s)
+=== RUN   TestFetchCRT_Non200
+--- PASS: TestFetchCRT_Non200 (0.00s)
+=== RUN   TestFetchCRT_BlockedHost
+--- PASS: TestFetchCRT_BlockedHost (0.00s)
+=== RUN   TestLookupDNS_Localhost
+--- PASS: TestLookupDNS_Localhost (0.00s)
+PASS
+ok  	websurfacehq/scanner-agent/internal/dnsenum	0.008s
+=== RUN   TestParseSubfinder_Fixture
+--- PASS: TestParseSubfinder_Fixture (0.00s)
+=== RUN   TestParseSubfinder_EmptyAndArray
+--- PASS: TestParseSubfinder_EmptyAndArray (0.00s)
+=== RUN   TestParseCRT_Fixture
+--- PASS: TestParseCRT_Fixture (0.00s)
+=== RUN   TestParseCRT_MalformedAndUnrelated
+--- PASS: TestParseCRT_MalformedAndUnrelated (0.00s)
+=== RUN   TestParseHttpx_RealCapture
+--- PASS: TestParseHttpx_RealCapture (0.03s)
+=== RUN   TestParseSubfinder_RealCapture
+--- PASS: TestParseSubfinder_RealCapture (0.00s)
+=== RUN   TestParseNaabu_RealCapture
+--- PASS: TestParseNaabu_RealCapture (0.00s)
+=== RUN   TestParseKatana_RealCapture
+--- PASS: TestParseKatana_RealCapture (0.00s)
+=== RUN   TestParseNaabu_Fixture
+--- PASS: TestParseNaabu_Fixture (0.00s)
+=== RUN   TestParseNaabu_Empty
+--- PASS: TestParseNaabu_Empty (0.00s)
+=== RUN   TestParseHttpx_Fixture
+--- PASS: TestParseHttpx_Fixture (0.00s)
+=== RUN   TestParseKatana_Fixture
+--- PASS: TestParseKatana_Fixture (0.00s)
+=== RUN   TestJSFiles_QueryAndCase
+--- PASS: TestJSFiles_QueryAndCase (0.00s)
+PASS
+ok  	websurfacehq/scanner-agent/internal/parsers	0.040s
+=== RUN   TestRun_Echo
+--- PASS: TestRun_Echo (0.00s)
+=== RUN   TestRun_StdinPassedThrough
+--- PASS: TestRun_StdinPassedThrough (0.00s)
+=== RUN   TestRun_NonZeroExit
+--- PASS: TestRun_NonZeroExit (0.00s)
+=== RUN   TestRun_MissingBinary
+--- PASS: TestRun_MissingBinary (0.00s)
+=== RUN   TestRun_TimeoutKillsSleep
+--- PASS: TestRun_TimeoutKillsSleep (0.30s)
+=== RUN   TestRun_TimeoutKillsProcessGroup
+--- PASS: TestRun_TimeoutKillsProcessGroup (0.30s)
+=== RUN   TestLookPath
+--- PASS: TestLookPath (0.00s)
+PASS
+ok  	websurfacehq/scanner-agent/internal/runner	0.614s
+=== RUN   TestCheckResolvedIPs_BlockedRanges
+--- PASS: TestCheckResolvedIPs_BlockedRanges (0.00s)
+
+=== go test ./... summary ===
+ok  	websurfacehq/scanner-agent/cmd/scanner-agent	0.022s
+ok  	websurfacehq/scanner-agent/internal/agent	0.016s
+ok  	websurfacehq/scanner-agent/internal/dnsenum	0.007s
+ok  	websurfacehq/scanner-agent/internal/parsers	0.005s
+ok  	websurfacehq/scanner-agent/internal/runner	0.612s
+ok  	websurfacehq/scanner-agent/internal/ssrf	0.007s
