@@ -16,7 +16,13 @@ from dataclasses import dataclass
 import pytest
 
 from app.auth.jwt import User
-from app.auth.permissions import can
+from app.auth.permissions import (
+    ADMIN_ACTIONS,
+    ADMIN_ALL_STAFF_ACTIONS,
+    ADMIN_OWNER_ADMIN_ACTIONS,
+    ADMIN_OWNER_ONLY_ACTIONS,
+    can,
+)
 
 OWNER_ID = uuid.uuid4()
 OTHER_ID = uuid.uuid4()
@@ -200,3 +206,103 @@ def test_cross_tenant_denial_still_denies_when_store_is_missing(
     monkeypatch.setattr(app.db, "get_store", _unavailable)
     target = FakeTarget(id=uuid.uuid4(), user_id=OTHER_ID, verification_status="verified")
     assert can(owner, "target.read", target) is False
+
+
+# ---------------------------------------------------------------------------
+# Platform roles (admin foundation, migration 0007): Owner / Admin /
+# Support for ``admin.*`` actions. The platform role is resolved
+# server-side from staff_roles and passed in by the caller — can()
+# trusts only that argument, never anything from the client. Support
+# sees Support + Abuse screens only; Admin on /founder -> 403; every
+# staff-account mutation is Owner-only (DESIGN-LOCK.md, frozen
+# 15 Nov 2026).
+# ---------------------------------------------------------------------------
+
+
+def test_admin_owner_can_do_every_admin_action(owner: User) -> None:
+    for action in sorted(ADMIN_ACTIONS):
+        assert can(owner, action, None, platform_role="owner") is True, action
+
+
+def test_admin_admin_role_matrix(owner: User) -> None:
+    for action in sorted(ADMIN_OWNER_ONLY_ACTIONS):
+        assert can(owner, action, None, platform_role="admin") is False, action
+    for action in sorted(ADMIN_OWNER_ADMIN_ACTIONS):
+        assert can(owner, action, None, platform_role="admin") is True, action
+    for action in sorted(ADMIN_ALL_STAFF_ACTIONS):
+        assert can(owner, action, None, platform_role="admin") is True, action
+
+
+def test_admin_support_sees_support_and_abuse_only(owner: User) -> None:
+    for action in sorted(ADMIN_ALL_STAFF_ACTIONS):
+        assert can(owner, action, None, platform_role="support") is True, action
+    for action in sorted(ADMIN_OWNER_ONLY_ACTIONS | ADMIN_OWNER_ADMIN_ACTIONS):
+        assert can(owner, action, None, platform_role="support") is False, action
+
+
+def test_admin_founder_is_owner_only(owner: User) -> None:
+    # Admin on /founder -> 403; Support likewise.
+    assert can(owner, "admin.founder.read", None, platform_role="owner") is True
+    assert can(owner, "admin.founder.read", None, platform_role="admin") is False
+    assert can(owner, "admin.founder.read", None, platform_role="support") is False
+
+
+def test_admin_action_without_platform_role_is_denied(owner: User) -> None:
+    # A customer calling an admin endpoint (no server-resolved staff
+    # role) is denied every admin action, even a read.
+    for action in sorted(ADMIN_ACTIONS):
+        assert can(owner, action, None) is False, action
+        assert can(owner, action, None, platform_role=None) is False, action
+
+
+def test_admin_unknown_platform_role_is_denied(owner: User) -> None:
+    for role in ("superuser", "Owner", "OWNER", "", "customer"):
+        assert can(owner, "admin.users.read", None, platform_role=role) is False, role
+        assert can(owner, "admin.founder.read", None, platform_role=role) is False, role
+
+
+def test_admin_unknown_action_is_denied(owner: User) -> None:
+    assert can(owner, "admin.explode", None, platform_role="owner") is False
+    assert can(owner, "admin.users", None, platform_role="owner") is False
+    assert can(owner, "admin", None, platform_role="owner") is False
+
+
+def test_admin_anonymous_is_denied_even_with_a_platform_role() -> None:
+    # No user -> False, whatever role string is offered.
+    assert can(None, "admin.users.read", None, platform_role="owner") is False
+    assert can(None, "admin.founder.read", None, platform_role="owner") is False
+
+
+def test_admin_decision_ignores_the_resource(owner: User) -> None:
+    # Staff are not tenants: the role alone decides, with or without a
+    # resource. (Tenancy never applies to admin actions.)
+    target = FakeTarget(id=uuid.uuid4(), user_id=OTHER_ID, verification_status="verified")
+    assert can(owner, "admin.users.suspend", target, platform_role="owner") is True
+    assert can(owner, "admin.users.suspend", target, platform_role="admin") is False
+    assert can(owner, "admin.abuse.read", target, platform_role="support") is True
+
+
+def test_admin_platform_role_is_the_sole_authority() -> None:
+    # The customer ``user.role`` is irrelevant to admin actions: a
+    # non-owner customer User with a server-resolved staff Owner role
+    # passes (the staff door resolved the role from staff_roles), and
+    # the platform role never widens a customer action.
+    viewer = User(id=OWNER_ID, email="viewer@example.com", role="viewer")
+    assert can(viewer, "admin.users.invite", None, platform_role="owner") is True
+    assert can(viewer, "admin.users.invite", None, platform_role="admin") is False
+
+
+def test_customer_actions_ignore_the_platform_role(owner: User) -> None:
+    # The two namespaces do not leak into each other: a platform role
+    # neither grants nor removes a customer permission.
+    target = FakeTarget(id=uuid.uuid4(), user_id=OWNER_ID, verification_status="verified")
+    assert can(owner, "target.read", target, platform_role="support") is True
+    viewer = User(id=OWNER_ID, email="viewer@example.com", role="viewer")
+    assert can(viewer, "target.read", target, platform_role="owner") is False
+    assert can(viewer, "target.create", None, platform_role="owner") is False
+
+
+def test_admin_can_never_raises(owner: User) -> None:
+    # platform_role of a wrong type, resource that misbehaves — still
+    # False, never an exception.
+    assert can(owner, "admin.users.read", None, platform_role=object()) is False  # type: ignore[arg-type]

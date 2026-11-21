@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     api_public_url: str | None = None
+    # The API's own public hostname (e.g. the Render hostname,
+    # ``websurfacehq-api.onrender.com`` — host only, no scheme).
+    # The staff API host gate (``app/core/staff_prefix.py``) must
+    # accept it: the Host header arriving at the API is ALWAYS the
+    # API origin — the web middleware proxies staff calls with
+    # ``Host: <API origin>`` (the staff web host arrives only as
+    # X-Forwarded-Host, which the API deliberately does not trust),
+    # and direct clients (live-proof curls, health checks) address
+    # the API by its own hostname too. Without this, every staff
+    # API call 404s in production. The gate ALSO accepts the host
+    # parsed from ``api_public_url`` when that is set, so either
+    # variable alone is enough. Empty in local dev (localhost is
+    # allowed there); set it in staging/production.
+    api_public_host: str | None = None
     # Comma-separated allowed browser origins (CORS). No wildcard in prod.
     cors_origins: list[str] = ["http://localhost:3000"]
     # Trust X-Forwarded-For for the client IP (rate limiting) ONLY when
@@ -84,6 +98,39 @@ class Settings(BaseSettings):
     # the API answers 410 VERIFICATION_EXPIRED (docs/api-conventions.md).
     verification_token_bytes: int = 32
     verification_token_ttl_days: int = 7
+
+    # --- Staff door (admin foundation, 20 Nov 2026) -----------------------
+    # The staff site lives under a SECRET random path prefix on the admin
+    # subdomain (DESIGN-LOCK.md, "Secret staff address"). The prefix is
+    # generated once at setup (128-bit random), stored in server config
+    # ONLY, never committed. Empty = prefix enforcement OFF — local dev
+    # only; staging/production refuse to start without it (see
+    # _require_prod_secrets below).
+    staff_url_prefix: str = ""
+    # Step-up MFA for the Founder screen: when True (default ON — owner
+    # decision still open, ON is the recommended default), opening
+    # Founder requires a fresh MFA check once per staff session.
+    staff_step_up_mfa: bool = True
+    # Staff session lifetimes (DESIGN-LOCK.md, "Staff sessions"): absolute
+    # lifetime 12h, idle 60 min -> sign in again. TOTP at EVERY staff
+    # sign-in; no trusted-device bypass (enforced in app/auth/sessions.py).
+    staff_session_absolute_hours: int = 12
+    staff_session_idle_minutes: int = 60
+    # Dummy-hash target (H1 retune, 20 Nov 2026): the unknown-email
+    # login path burns a time-based PBKDF2 equalizer for this many
+    # milliseconds, standing in for the bcrypt GoTrue runs on the
+    # known-email path and skips (``app/auth/provider.py`` lookup).
+    # Measured live against the real GoTrue project
+    # (dpwfshafzyxyfoktsggo, 3 runs x 10 attempts per path, 20 Nov
+    # 2026): wrong-password median 403/479/453 ms vs unknown-email
+    # median 344/406/363 ms — the bcrypt component is the
+    # difference, 59/73/90 ms (median-of-diffs ~73 ms, network
+    # baseline ~400 ms from this VM dominates both). Default 75 ms
+    # is that measured value, rounded. The equalizer loop
+    # self-calibrates to any host CPU (it burns wall-clock time,
+    # not a fixed iteration count), so the target — not the host —
+    # is what needs retuning if GoTrue's cost changes.
+    staff_dummy_hash_target_ms: int = 75
 
     # --- Storage -------------------------------------------------------------
     # Signed-URL expiry for private report downloads: 15 min (proposed value
@@ -125,12 +172,42 @@ class Settings(BaseSettings):
                 ("SUPABASE_ANON_KEY", self.supabase_anon_key),
                 ("SUPABASE_SERVICE_ROLE_KEY", self.supabase_service_role_key),
                 ("INTERNAL_SIGNING_SECRET", self.internal_signing_secret),
+                # Staff door: a production deploy without the secret
+                # prefix would serve the staff site at a guessable path.
+                ("STAFF_URL_PREFIX", self.staff_url_prefix),
             )
             if not value
         ]
         if missing:
             raise ValueError(
                 f"Missing required settings in {self.environment.value}: " + ", ".join(missing)
+            )
+        # N9: a short or guessable staff prefix is a live hole — the
+        # prefix is the staff door's obscurity layer, and a 4-char
+        # prefix is brute-forceable. Staging/production refuse to
+        # start unless it meets the minimum entropy rule (16+ chars,
+        # URL-path-safe charset only). The setup generator issues
+        # 128-bit (22 chars); this is the floor, not the target.
+        from app.core.staff_prefix import staff_url_prefix_is_strong
+
+        if not staff_url_prefix_is_strong(self.staff_url_prefix):
+            raise ValueError(
+                "STAFF_URL_PREFIX must be at least 16 characters of "
+                "[A-Za-z0-9_-] in staging/production (128-bit random, "
+                "22 chars, generated at setup)"
+            )
+        # B1 (re-review #3): the staff API host gate
+        # (app/core/staff_prefix.py, get_api_public_hosts) accepts no
+        # host when neither API_PUBLIC_HOST nor API_PUBLIC_URL is set,
+        # so every staff API call 404s — fail fast here like the
+        # sibling STAFF_URL_PREFIX check, instead of starting cleanly
+        # and dying at the first staff login. Either variable alone
+        # is enough.
+        if not (self.api_public_host or self.api_public_url):
+            raise ValueError(
+                "API_PUBLIC_HOST or API_PUBLIC_URL must be set in "
+                "staging/production (the staff API host gate rejects "
+                "every staff call without one)"
             )
         return self
 

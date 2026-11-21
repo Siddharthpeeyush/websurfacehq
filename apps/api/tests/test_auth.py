@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import secrets
 import time
 import uuid
 from collections.abc import Generator
@@ -151,11 +152,29 @@ class FakeAuthProvider:
             raise ApiError(401, "UNAUTHORIZED", "Invalid email or password")
         return self._mint(record["id"], email)
 
+    def user_exists(self, email: str) -> bool:
+        """Test twin of the Admin-API lookup: True when a user with
+        this email was signed up (case-insensitive, like GoTrue)."""
+        return email.strip().lower() in {e.lower() for e in self._users}
+
     def sign_out(self, access_token: str) -> None:
         self.revoked_tokens.add(access_token)
 
     def reset_password(self, email: str) -> None:
         self.reset_requested.append(email)
+
+    def disable_password(self, user_id: uuid.UUID) -> None:
+        """Test twin of the Admin-API disable (F2 fix): replace the
+        user's stored password digest with one derived from a fresh
+        random secret, so the old password stops signing in while the
+        reset path (``reset_password`` above) still works. Raises 404
+        for an unknown id, mirroring an upstream user-not-found."""
+        for record in self._users.values():
+            if record["id"] == str(user_id):
+                secret = secrets.token_urlsafe(32)
+                record["password_hash"] = hashlib.sha256(secret.encode()).hexdigest()
+                return
+        raise ApiError(404, "NOT_FOUND", "No such Auth user")
 
     def exchange_code(self, code: str) -> AuthSession:
         email = self._codes.get(code)

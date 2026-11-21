@@ -19,7 +19,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -32,9 +32,13 @@ from app.core.errors import ApiError, ErrorResponse
 from app.core.health import health_payload
 from app.core.http import sanitize_no_proxy_env
 from app.core.logging import configure_logging, logger, request_id_var
+from app.core.staff_prefix import get_staff_url_prefix, require_staff_host, require_staff_prefix
+from app.routers import admin as admin_router
+from app.routers import admin_ops as admin_ops_router
 from app.routers import auth as auth_router
 from app.routers import findings as findings_router
 from app.routers import scans as scans_router
+from app.routers import staff_auth as staff_auth_router
 from app.routers import targets as targets_router
 
 # Live-proof fix F1(b): strip bracketed IPv6 entries (e.g. [::1]) from
@@ -137,12 +141,21 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     """Application factory (also lets tests build a fresh app)."""
+    # F1 fix (red-team, 20 Nov 2026): the OpenAPI schema is OFF
+    # outside development. ``docs_url``/``redoc_url`` were already
+    # gated on production, but ``openapi_url`` was never set, so
+    # FastAPI still served ``/openapi.json`` in production —
+    # enumerating every staff route WITH the secret prefix in the
+    # path, from any host, with no auth. The schema is the staff
+    # door's obscurity layer in reverse; staging is gated too (its
+    # prefix is just as secret). Dev keeps the docs as before.
     app = FastAPI(
         title="WebSurfaceHQ API",
         description="Vulnerability-scanner SaaS backend.",
         version="0.1.0",
         docs_url="/docs" if not settings.is_production else None,
         redoc_url="/redoc" if not settings.is_production else None,
+        openapi_url="/openapi.json" if settings.environment is Environment.DEVELOPMENT else None,
     )
     # CORS first, so RequestContextMiddleware (added next) is outermost and
     # its security headers + request-id land on every response, including
@@ -183,6 +196,47 @@ def create_app() -> FastAPI:
     app.include_router(targets_router.router)
     app.include_router(scans_router.router)
     app.include_router(findings_router.router)
+    # Admin-foundation (Child D): the staff door. The staff routers
+    # mount UNDER the secret prefix (``/<prefix>/admin/...``,
+    # ``/<prefix>/staff/auth/...``) with Child C's ``require_staff_prefix``
+    # guard on every one of them — a request to the staff host outside
+    # the prefix answers the generic 404 (DESIGN-LOCK, secret staff
+    # address). With an empty prefix (local dev) enforcement is off
+    # and the routers mount at root (``/<prefix>`` is ``""``).
+    prefix = get_staff_url_prefix()
+    mount_prefix = f"/{prefix}" if prefix else ""
+    # M3 fix: the host gate runs alongside the prefix guard — the
+    # API itself refuses staff paths on any host but the allowlist
+    # (staff host + the API's own public host, localhost in dev
+    # only; see app/core/staff_prefix.py). The two doors used to
+    # exist only in the web middleware, so a customer host
+    # presenting the prefixed path + a valid staff session got a
+    # 200 from the API; now it gets the generic 404.
+    staff_dependencies = [Depends(require_staff_prefix), Depends(require_staff_host)]
+    # F1 defence in depth: the staff routers are excluded from the
+    # OpenAPI schema (``include_in_schema=False``) in EVERY
+    # environment — even in dev, where the schema is served, it must
+    # never enumerate the secret-prefixed staff routes. The routes
+    # themselves are unaffected (they still serve); only the schema
+    # omits them.
+    app.include_router(
+        admin_router.router,
+        prefix=mount_prefix,
+        dependencies=staff_dependencies,
+        include_in_schema=False,
+    )
+    app.include_router(
+        admin_ops_router.router,
+        prefix=mount_prefix,
+        dependencies=staff_dependencies,
+        include_in_schema=False,
+    )
+    app.include_router(
+        staff_auth_router.router,
+        prefix=mount_prefix,
+        dependencies=staff_dependencies,
+        include_in_schema=False,
+    )
 
     @app.exception_handler(ApiError)
     async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
