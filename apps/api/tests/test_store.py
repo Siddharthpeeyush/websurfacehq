@@ -245,3 +245,81 @@ def test_list_scans_excludes_soft_deleted() -> None:
     # get_scan still returns the row itself (same as get_target's
     # behaviour is NOT mirrored here — list is the fixed surface).
     assert store.get_scan(TENANT_A_USER_ID, gone.id) is not None
+
+
+# --- Staff accounts / invites / admin settings (C2 + C3 fixes) -----------
+
+
+def test_staff_account_crud_and_factor_ids() -> None:
+    from datetime import datetime, timezone
+
+    from app.db.store import DuplicateOwnerAccountError, DuplicateStaffAccountError
+
+    store = InMemoryStore()
+    now = datetime(2026, 11, 20, 12, 0, 0, tzinfo=timezone.utc)
+    owner_id = uuid.uuid4()
+    admin_id = uuid.uuid4()
+    owner = store.create_staff_account(owner_id, "Owner@Example.com", "owner", None, now)
+    assert owner.email == "owner@example.com"  # normalized
+    assert owner.status == "active"
+    assert owner.created_at == now
+    with pytest.raises(DuplicateOwnerAccountError):
+        store.create_staff_account(uuid.uuid4(), "second@example.com", "owner", owner_id)
+    with pytest.raises(DuplicateStaffAccountError):
+        store.create_staff_account(uuid.uuid4(), "OWNER@example.com", "admin", owner_id)
+    admin = store.create_staff_account(admin_id, "admin@example.com", "admin", owner_id)
+    assert store.get_staff_account(admin_id) is admin
+    assert store.get_staff_account_by_email("ADMIN@EXAMPLE.COM") is admin
+    assert {row.user_id for row in store.list_staff_accounts()} == {owner_id, admin_id}
+    updated = store.update_staff_account(admin_id, role="support", status="suspended")
+    assert updated is not None and updated.role == "support" and updated.status == "suspended"
+    with_factor = store.set_staff_factor_ids(
+        admin_id, current_factor_id="factor-1", pending_factor_id="factor-2"
+    )
+    assert with_factor is not None
+    assert with_factor.current_factor_id == "factor-1"
+    assert with_factor.pending_factor_id == "factor-2"
+    cleared = store.set_staff_factor_ids(admin_id, current_factor_id=None, pending_factor_id=None)
+    assert cleared is not None
+    assert cleared.current_factor_id is None and cleared.pending_factor_id is None
+    assert store.delete_staff_account(admin_id) is True
+    assert store.get_staff_account(admin_id) is None
+    assert store.get_staff_account_by_email("admin@example.com") is None
+    assert store.delete_staff_account(admin_id) is False
+
+
+def test_staff_invite_claim_is_single_use() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    store = InMemoryStore()
+    now = datetime(2026, 11, 20, 12, 0, 0, tzinfo=timezone.utc)
+    inviter = uuid.uuid4()
+    invite = store.create_staff_invite(
+        "NewHire@Example.com",
+        "support",
+        inviter,
+        _hash("invite-token"),
+        now + timedelta(hours=72),
+        now,
+    )
+    assert invite.email == "newhire@example.com"
+    claimed = store.claim_staff_invite(_hash("invite-token"), now)
+    assert claimed is not None and claimed.id == invite.id
+    assert claimed.used_at == now
+    assert store.claim_staff_invite(_hash("invite-token"), now) is None
+    assert store.get_staff_invite(invite.id) is not None
+    # Expired invites never claim.
+    store.create_staff_invite("late@example.com", "admin", inviter, _hash("old-token"), now, now)
+    assert store.claim_staff_invite(_hash("old-token"), now) is None
+
+
+def test_admin_settings_prefix_version_round_trip() -> None:
+    store = InMemoryStore()
+    assert store.get_prefix_version() == 1  # seeded by the migration
+    assert store.get_admin_setting("prefix_version") == "1"
+    assert store.bump_prefix_version() == 2
+    assert store.bump_prefix_version() == 3
+    assert store.get_prefix_version() == 3
+    assert store.set_prefix_version(1) == 1
+    assert store.set_admin_setting("probe-key", "probe-value") == "probe-value"
+    assert store.get_admin_setting("probe-key") == "probe-value"

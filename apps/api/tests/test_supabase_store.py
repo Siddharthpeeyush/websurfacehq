@@ -88,3 +88,48 @@ def test_create_target_other_errors_propagate(
     store = _store_with_failing_insert(monkeypatch, RuntimeError("connection reset by peer"))
     with pytest.raises(RuntimeError, match="connection reset"):
         store.create_target(UUID(int=1), "x.example.com", "hash")
+
+
+def test_create_staff_account_second_owner_trigger_maps_to_owner_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: the single-Owner trigger message maps to
+    DuplicateOwnerAccountError (service: 409), not to a generic
+    duplicate."""
+    from app.db.store import DuplicateOwnerAccountError
+
+    store = _store_with_failing_insert(monkeypatch, Exception("only one Owner may exist"))
+    with pytest.raises(DuplicateOwnerAccountError):
+        store.create_staff_account(UUID(int=1), "second@example.com", "owner", None)
+
+
+def test_create_staff_account_owner_index_checked_before_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: the partial unique Owner index name is checked FIRST — an
+    error mentioning both the index and 'duplicate' (a duplicate email
+    for an owner@... address) must map to the Owner error, not the
+    generic duplicate."""
+    from app.db.store import DuplicateOwnerAccountError
+
+    store = _store_with_failing_insert(
+        monkeypatch,
+        Exception('duplicate key value violates unique constraint "staff_roles_single_owner_idx"'),
+    )
+    with pytest.raises(DuplicateOwnerAccountError):
+        store.create_staff_account(UUID(int=1), "owner@example.com", "owner", None)
+
+
+def test_create_staff_account_duplicate_email_maps_to_staff_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: a plain unique violation (email) maps to
+    DuplicateStaffAccountError (service: 409)."""
+    from app.db.store import DuplicateStaffAccountError
+
+    store = _store_with_failing_insert(
+        monkeypatch,
+        Exception('duplicate key value violates unique constraint "staff_roles_email_key"'),
+    )
+    with pytest.raises(DuplicateStaffAccountError):
+        store.create_staff_account(UUID(int=1), "admin@example.com", "admin", None)

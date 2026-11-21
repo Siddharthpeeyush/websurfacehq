@@ -135,6 +135,49 @@ class AuditLog:
 
 
 @dataclass
+class StaffAccountRow:
+    """One staff account (migration 0007 ``staff_roles``).
+
+    ``current_factor_id`` / ``pending_factor_id`` are GoTrue TOTP
+    factor ids (identifiers, NOT secrets). ``mfa_enrolled`` is a
+    cache flag for admin display — the authoritative MFA check at
+    login is ``MfaService.list_factors`` against the stored factor
+    id. This dataclass IS the service layer's ``StaffAccount``: the
+    store returns the stored row object (in-memory) so a caller
+    holding a reference always sees the current persisted state.
+    """
+
+    user_id: UUID
+    email: str
+    role: str  # owner | admin | support
+    status: str = "active"  # active | suspended
+    invited_by: UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    mfa_enrolled: bool = False
+    current_factor_id: str | None = None
+    pending_factor_id: str | None = None
+
+
+@dataclass
+class StaffInviteRow:
+    """One staff invite (migration 0007 ``staff_invites``).
+
+    ``token_hash`` is the SHA-256 hex of the raw token — the raw
+    token is never stored, logged, or returned after creation.
+    """
+
+    id: UUID
+    token_hash: str
+    email: str
+    role: str  # owner | admin | support
+    invited_by: UUID
+    expires_at: datetime
+    used_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass
 class ScanJob:
     """One pipeline stage of one scan. ``idempotency_key`` is
     ``scan_id:stage:target_hash`` (blueprint §1.5) — re-running the same
@@ -202,6 +245,17 @@ class ScanConflictError(ValueError):
     """Raised by cancel_scan when the scan is in a terminal state
     (done / failed / already cancelled). Routers map it to 409
     SCAN_CONFLICT."""
+
+
+class DuplicateStaffAccountError(ValueError):
+    """Raised by create_staff_account when the email already has a
+    staff row. The service maps it to DuplicateStaffError (409)."""
+
+
+class DuplicateOwnerAccountError(ValueError):
+    """Raised by create_staff_account (or an update to role owner)
+    when an Owner row already exists. The service maps it to
+    DuplicateOwnerError (409)."""
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +419,179 @@ class Store(Protocol):
         target_domain: str | None,
         metadata: dict[str, Any],
     ) -> AuditLog: ...
+
+    def list_audit_logs(
+        self,
+        *,
+        actor_id: UUID | None = None,
+        action: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        search: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[AuditLog], str | None]:
+        """Admin audit viewer (GET /admin/system/audit — filters: actor,
+        action, date, search, per the admin-foundation plan §3).
+
+        NO tenant scoping: audit rows span all tenants, and this method
+        is staff-only. Callers MUST gate it with
+        ``can(user, "admin.audit.read", platform_role=...)`` first — the
+        store does not enforce staff authorization. ``actor_id`` /
+        ``action`` filter exactly; ``since`` / ``until`` bound
+        ``created_at`` (inclusive); ``search`` is a substring match over
+        ``action`` and ``target_domain`` (the in-memory implementation
+        also matches the metadata text; the SQL implementation matches
+        action + target_domain only — jsonb text search is not
+        expressible through the query builder). Pagination follows the
+        same opaque cursor convention as the other list methods
+        (``created_at`` desc, ``id`` desc)."""
+
+    # -- staff roles -----------------------------------------------------
+    def get_staff_role(self, user_id: UUID) -> tuple[str, str] | None:
+        """The staff row for a user as ``(role, status)``, or ``None``
+        when the user has no staff row. Role is one of
+        ``owner`` | ``admin`` | ``support``; status is ``active`` |
+        ``suspended``. Child C's staff auth resolves the platform role
+        server-side through this method — the role is NEVER trusted
+        from the client. The row itself is never returned."""
+
+    # -- staff accounts (admin foundation, C2 fix) ----------------------
+    # The DB (migration 0007 ``staff_roles``) is the source of truth
+    # for staff accounts — the process-local registry they used to
+    # live in is gone. ``create_staff_account`` enforces the
+    # exactly-one-Owner rule and the one-row-per-email rule
+    # atomically in the store (the DB's partial unique index is the
+    # backstop on the Supabase path); it raises
+    # DuplicateOwnerAccountError / DuplicateStaffAccountError.
+    def create_staff_account(
+        self,
+        user_id: UUID,
+        email: str,
+        role: str,
+        invited_by: UUID | None,
+        created_at: datetime | None = None,
+    ) -> StaffAccountRow: ...
+
+    def get_staff_account(self, user_id: UUID) -> StaffAccountRow | None:
+        """The full staff row for a user, or None (incl. deleted)."""
+        ...
+
+    def get_staff_account_by_email(self, email: str) -> StaffAccountRow | None:
+        """The staff row for an email (case-insensitive), or None."""
+        ...
+
+    def list_staff_accounts(self) -> list[StaffAccountRow]:
+        """Every staff account (Owner-only callers)."""
+        ...
+
+    def update_staff_account(
+        self,
+        user_id: UUID,
+        *,
+        role: str | None = None,
+        status: str | None = None,
+        mfa_enrolled: bool | None = None,
+    ) -> StaffAccountRow | None:
+        """Patch role / status / mfa_enrolled (only the given fields).
+        Returns the updated row, or None when the user has no staff
+        row. May raise DuplicateOwnerAccountError when re-roling to
+        owner while an Owner exists."""
+        ...
+
+    def set_staff_factor_ids(
+        self,
+        user_id: UUID,
+        *,
+        current_factor_id: str | None,
+        pending_factor_id: str | None,
+    ) -> StaffAccountRow | None:
+        """Set BOTH factor ids explicitly (``None`` clears one). The
+        two ids are written together so an enroll/confirm step can
+        never leave a half-written pair. Returns the updated row, or
+        None when the user has no staff row."""
+        ...
+
+    def delete_staff_account(self, user_id: UUID) -> bool:
+        """Delete the staff row. False when there was no row. Audit
+        rows are untouched (separate table)."""
+        ...
+
+    # -- staff invites (admin foundation, C2 fix) -----------------------
+    def create_staff_invite(
+        self,
+        email: str,
+        role: str,
+        invited_by: UUID,
+        token_hash: str,
+        expires_at: datetime,
+        created_at: datetime | None = None,
+    ) -> StaffInviteRow:
+        """Store an invite (raw token never stored, only its hash).
+        ``created_at`` pins the row's creation time when the caller
+        supplies one (tests place invites in the past); otherwise the
+        store stamps now."""
+
+    def claim_staff_invite(self, token_hash: str, now: datetime) -> StaffInviteRow | None:
+        """Atomically claim an invite by token hash: stamps used_at
+        and returns the row only when the invite exists, is unused,
+        and has not expired (``now < expires_at``). Returns None —
+        identically — for invalid, used, and expired tokens. On the
+        Supabase path this is a single UPDATE ... WHERE used_at IS
+        NULL AND expires_at > now RETURNING, so two concurrent
+        claims cannot both succeed."""
+        ...
+
+    def get_staff_invite(self, invite_id: UUID) -> StaffInviteRow | None:
+        """Look an invite up by id (admin inspection; never by raw token)."""
+        ...
+
+    def revoke_pending_staff_invites(self, email: str, now: datetime) -> int:
+        """Invalidate every PENDING invite for an email (unused and
+        unexpired). Returns the count revoked. Used on re-invite, so
+        only the newest setup link for an email is ever live.
+
+        Revocation reuses ``used_at`` (migration 0007 has no
+        ``revoked_at`` column): a revoked invite is indistinguishable
+        from a used one in the row — which is exactly the claim-time
+        behaviour (``claim_staff_invite`` returns None for both, so
+        the old token 404s). The audit row (``staff.invite_revoked``
+        / ``staff.invite_created`` with ``prior_invites_revoked``)
+        is the record of which it was."""
+
+    def revoke_staff_invite(self, invite_id: UUID, now: datetime) -> StaffInviteRow | None:
+        """Revoke ONE pending invite by id (Owner invite-revoke).
+        Returns the revoked row, or None when there is no such invite
+        or it is already consumed/expired (already unusable — the
+        caller answers 404 either way). Same ``used_at`` reuse as
+        :meth:`revoke_pending_staff_invites`."""
+        ...
+
+    # -- admin settings (admin foundation, C3 fix) ----------------------
+    # Key/value settings in migration 0007's ``admin_settings``
+    # table (service_role only). ``prefix_version`` lives here: the
+    # staff-prefix version counter is persisted, so a restart or a
+    # second replica cannot resurrect sessions a rotation killed.
+    def get_admin_setting(self, key: str) -> str | None:
+        """The stored value for a key, or None when unset."""
+        ...
+
+    def set_admin_setting(self, key: str, value: str) -> str:
+        """Upsert a setting value. Returns the stored value."""
+        ...
+
+    def get_prefix_version(self) -> int:
+        """The persisted staff-prefix version (1 when never set)."""
+        ...
+
+    def set_prefix_version(self, version: int) -> int:
+        """Persist a prefix version (tests / reset). Returns it."""
+        ...
+
+    def bump_prefix_version(self) -> int:
+        """Atomically increment the persisted prefix version and
+        return the new value (prefix rotation)."""
+        ...
 
     def get_owner(self, resource_kind: str, resource_id: UUID) -> UUID | None:
         """The owning user_id of a row REGARDLESS of tenancy, or None when

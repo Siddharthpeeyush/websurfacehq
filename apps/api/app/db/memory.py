@@ -13,6 +13,7 @@ identities — the SQL seed must use these same UUIDs in the integration pass.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,11 +23,15 @@ from uuid import UUID
 from app.core.config import settings
 from app.db.store import (
     AuditLog,
+    DuplicateOwnerAccountError,
+    DuplicateStaffAccountError,
     DuplicateTargetError,
     Finding,
     Scan,
     ScanConflictError,
     ScanJob,
+    StaffAccountRow,
+    StaffInviteRow,
     Store,
     Subscription,
     Target,
@@ -91,6 +96,14 @@ class InMemoryStore:
         self._subscriptions: dict[UUID, Subscription] = {}
         self._audit: dict[UUID, AuditLog] = {}
         self._scan_jobs: dict[UUID, ScanJob] = {}
+        # Staff accounts / invites / admin settings (admin foundation,
+        # migration 0007). The DB is the source of truth — this dict
+        # IS the store's rows, not a second registry: service code
+        # reads and writes only through these methods.
+        self._staff_accounts: dict[UUID, StaffAccountRow] = {}
+        self._staff_by_email: dict[str, UUID] = {}
+        self._staff_invites: dict[str, StaffInviteRow] = {}
+        self._admin_settings: dict[str, str] = {"prefix_version": "1"}
 
     # -- health ----------------------------------------------------------
     def ping(self) -> bool:
@@ -423,6 +436,243 @@ class InMemoryStore:
             )
             self._audit[entry.id] = entry
             return entry
+
+    def list_audit_logs(
+        self,
+        *,
+        actor_id: UUID | None = None,
+        action: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        search: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[AuditLog], str | None]:
+        with self._lock:
+            rows = list(self._audit.values())
+            if actor_id is not None:
+                rows = [r for r in rows if r.user_id == actor_id]
+            if action is not None:
+                rows = [r for r in rows if r.action == action]
+            if since is not None:
+                rows = [r for r in rows if r.created_at is not None and r.created_at >= since]
+            if until is not None:
+                rows = [r for r in rows if r.created_at is not None and r.created_at <= until]
+            if search is not None:
+                rows = [
+                    r
+                    for r in rows
+                    if search in (r.action or "")
+                    or search in (r.target_domain or "")
+                    or search in json.dumps(r.metadata, default=str)
+                ]
+            return _paginate(rows, cursor, limit)
+
+    def get_staff_role(self, user_id: UUID) -> tuple[str, str] | None:
+        """(role, status) from this store's staff rows — the DB is
+        the source of truth (migration 0007's ``staff_roles`` table
+        on the Supabase path). No registry fallback: a missing row
+        reads as no staff row (fail closed), never as a role."""
+        with self._lock:
+            row = self._staff_accounts.get(user_id)
+            if row is None:
+                return None
+            return (str(row.role), row.status)
+
+    # -- staff accounts (admin foundation, C2 fix) ----------------------
+    def create_staff_account(
+        self,
+        user_id: UUID,
+        email: str,
+        role: str,
+        invited_by: UUID | None,
+        created_at: datetime | None = None,
+    ) -> StaffAccountRow:
+        with self._lock:
+            normalized = email.strip().lower()
+            if role == "owner" and any(
+                row.role == "owner" for row in self._staff_accounts.values()
+            ):
+                raise DuplicateOwnerAccountError("An Owner account already exists")
+            if normalized in self._staff_by_email:
+                raise DuplicateStaffAccountError(f"Staff account already exists for {normalized}")
+            if user_id in self._staff_accounts:
+                raise DuplicateStaffAccountError("Staff account already exists for this user")
+            now = created_at or _now()
+            row = StaffAccountRow(
+                user_id=user_id,
+                email=normalized,
+                role=role,
+                status="active",
+                invited_by=invited_by,
+                created_at=now,
+                updated_at=now,
+            )
+            self._staff_accounts[user_id] = row
+            self._staff_by_email[normalized] = user_id
+            return row
+
+    def get_staff_account(self, user_id: UUID) -> StaffAccountRow | None:
+        with self._lock:
+            # The stored row object itself (not a copy): callers
+            # holding a reference see in-place updates, and the
+            # service layer's identity guarantees hold.
+            return self._staff_accounts.get(user_id)
+
+    def get_staff_account_by_email(self, email: str) -> StaffAccountRow | None:
+        with self._lock:
+            user_id = self._staff_by_email.get(email.strip().lower())
+            return self._staff_accounts.get(user_id) if user_id is not None else None
+
+    def list_staff_accounts(self) -> list[StaffAccountRow]:
+        with self._lock:
+            return list(self._staff_accounts.values())
+
+    def update_staff_account(
+        self,
+        user_id: UUID,
+        *,
+        role: str | None = None,
+        status: str | None = None,
+        mfa_enrolled: bool | None = None,
+    ) -> StaffAccountRow | None:
+        with self._lock:
+            row = self._staff_accounts.get(user_id)
+            if row is None:
+                return None
+            if role is not None and role == "owner":
+                if any(
+                    other.role == "owner" and other.user_id != user_id
+                    for other in self._staff_accounts.values()
+                ):
+                    raise DuplicateOwnerAccountError("An Owner account already exists")
+            if role is not None:
+                row.role = role
+            if status is not None:
+                row.status = status
+            if mfa_enrolled is not None:
+                row.mfa_enrolled = mfa_enrolled
+            row.updated_at = _now()
+            return row
+
+    def set_staff_factor_ids(
+        self,
+        user_id: UUID,
+        *,
+        current_factor_id: str | None,
+        pending_factor_id: str | None,
+    ) -> StaffAccountRow | None:
+        with self._lock:
+            row = self._staff_accounts.get(user_id)
+            if row is None:
+                return None
+            row.current_factor_id = current_factor_id
+            row.pending_factor_id = pending_factor_id
+            row.updated_at = _now()
+            return row
+
+    def delete_staff_account(self, user_id: UUID) -> bool:
+        with self._lock:
+            row = self._staff_accounts.pop(user_id, None)
+            if row is None:
+                return False
+            self._staff_by_email.pop(row.email, None)
+            return True
+
+    # -- staff invites (admin foundation, C2 fix) -----------------------
+    def create_staff_invite(
+        self,
+        email: str,
+        role: str,
+        invited_by: UUID,
+        token_hash: str,
+        expires_at: datetime,
+        created_at: datetime | None = None,
+    ) -> StaffInviteRow:
+        with self._lock:
+            if token_hash in self._staff_invites:
+                raise ValueError("An invite with this token hash already exists")
+            now = created_at or _now()
+            invite = StaffInviteRow(
+                id=uuid.uuid4(),
+                token_hash=token_hash,
+                email=email.strip().lower(),
+                role=role,
+                invited_by=invited_by,
+                expires_at=expires_at,
+                created_at=now,
+            )
+            self._staff_invites[token_hash] = invite
+            return invite
+
+    def claim_staff_invite(self, token_hash: str, now: datetime) -> StaffInviteRow | None:
+        with self._lock:
+            invite = self._staff_invites.get(token_hash)
+            if invite is None:
+                return None
+            if invite.used_at is not None:
+                return None
+            if now >= invite.expires_at:
+                return None
+            invite.used_at = now
+            return invite
+
+    def get_staff_invite(self, invite_id: UUID) -> StaffInviteRow | None:
+        with self._lock:
+            for invite in self._staff_invites.values():
+                if invite.id == invite_id:
+                    return invite
+            return None
+
+    def revoke_pending_staff_invites(self, email: str, now: datetime) -> int:
+        with self._lock:
+            normalized = email.strip().lower()
+            count = 0
+            for invite in self._staff_invites.values():
+                if (
+                    invite.email == normalized
+                    and invite.used_at is None
+                    and now < invite.expires_at
+                ):
+                    invite.used_at = now
+                    count += 1
+            return count
+
+    def revoke_staff_invite(self, invite_id: UUID, now: datetime) -> StaffInviteRow | None:
+        with self._lock:
+            for invite in self._staff_invites.values():
+                if invite.id == invite_id:
+                    if invite.used_at is not None or now >= invite.expires_at:
+                        return None
+                    invite.used_at = now
+                    return invite
+            return None
+
+    # -- admin settings (admin foundation, C3 fix) ----------------------
+    def get_admin_setting(self, key: str) -> str | None:
+        with self._lock:
+            return self._admin_settings.get(key)
+
+    def set_admin_setting(self, key: str, value: str) -> str:
+        with self._lock:
+            self._admin_settings[key] = value
+            return value
+
+    def get_prefix_version(self) -> int:
+        with self._lock:
+            try:
+                return max(int(self._admin_settings.get("prefix_version", "1")), 1)
+            except ValueError:
+                return 1
+
+    def set_prefix_version(self, version: int) -> int:
+        with self._lock:
+            self._admin_settings["prefix_version"] = str(max(version, 1))
+            return self.get_prefix_version()
+
+    def bump_prefix_version(self) -> int:
+        with self._lock:
+            return self.set_prefix_version(self.get_prefix_version() + 1)
 
     def get_owner(self, resource_kind: str, resource_id: UUID) -> UUID | None:
         # Audit-only: the row itself is never returned, only its owner.

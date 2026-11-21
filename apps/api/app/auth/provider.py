@@ -18,6 +18,7 @@ tests construct the app with a fake provider, production never sees one.
 from __future__ import annotations
 
 import re
+import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Protocol
@@ -26,6 +27,7 @@ import httpx
 from gotrue.errors import AuthApiError
 from supabase import Client
 
+from app.auth.mfa import MfaService
 from app.core.config import Settings, settings
 from app.core.errors import ApiError
 from app.core.http import create_supabase_client as create_client
@@ -59,9 +61,34 @@ class AuthProvider(Protocol):
 
     def sign_in(self, email: str, password: str) -> AuthSession: ...
 
+    def user_exists(self, email: str) -> bool:
+        """True when an Auth user exists for ``email``.
+
+        Timing-equalization lookup (H1 double-count fix, 20 Nov
+        2026): after a failed ``sign_in`` the staff login flow
+        asks this to decide whether GoTrue ran bcrypt — if the user
+        exists, bcrypt ran and the dummy hash must be SKIPPED; if
+        not, the dummy runs. The answer is server-internal only
+        (never returned to a client) and the lookup itself is one
+        cheap Admin API round trip against bcrypt's ~75 ms. On any
+        error it returns False (fail towards running the dummy —
+        the timing cover stays on, the login still 401s).
+        """
+
     def sign_out(self, access_token: str) -> None: ...
 
     def reset_password(self, email: str) -> None: ...
+
+    def disable_password(self, user_id: uuid.UUID) -> None:
+        """Invalidate a user's password immediately (Admin API).
+
+        Replaces the password with a fresh random unguessable one,
+        so the old password stops working at the next sign-in while
+        the password-recovery email flow still works (the reset link
+        sets a new password — it does not need the old one). Used by
+        Owner force-reset (``app.services.staff``).
+        """
+        ...
 
     def exchange_code(self, code: str) -> AuthSession: ...
 
@@ -88,6 +115,14 @@ def _bad_gateway() -> ApiError:
 # nothing here guesses it.
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*")
 _MAX_AUTH_ERROR_CHARS = 200
+
+# Admin user-existence lookup (H1 double-count fix): GoTrue's Admin
+# API lists users only (no get-by-email), so user_exists pages the
+# list. 5 pages x 1000 users covers the project's scale with room;
+# beyond the cap the lookup answers False (run the dummy) rather
+# than claim an absence it did not prove.
+_ADMIN_USER_LOOKUP_PAGE_SIZE = 1000
+_ADMIN_USER_LOOKUP_MAX_PAGES = 5
 
 
 def _sanitize_auth_message(message: str | None) -> str:
@@ -120,6 +155,25 @@ class SupabaseAuthProvider:
     def __init__(self, app_settings: Settings | None = None) -> None:
         self._settings = app_settings or settings
         self._client: Client | None = None
+        self._mfa_service: MfaService | None = None
+
+    @property
+    def mfa(self) -> MfaService:
+        """Staff MFA (TOTP via GoTrue MFA REST — see ``app/auth/mfa.py``).
+
+        MFA hook, admin foundation (Child B): the staff login flow
+        calls ``provider.mfa.enroll / challenge_and_verify /
+        has_verified_totp_factor`` and the Founder gate calls
+        ``provider.mfa.verify_step_up``. Deliberately NOT added to the
+        ``AuthProvider`` Protocol above: the test fake implementing
+        that protocol lives in ``tests/test_auth.py`` (not this
+        child's file), and the MFA surface is consumed through
+        ``MfaService`` directly by the staff-auth router, not through
+        the password-auth protocol.
+        """
+        if self._mfa_service is None:
+            self._mfa_service = MfaService()
+        return self._mfa_service
 
     def _require_configured(self) -> None:
         if not self._settings.supabase_configured:
@@ -207,6 +261,63 @@ class SupabaseAuthProvider:
             user=self._to_auth_user(response.user.id, response.user.email),
         )
 
+    def user_exists(self, email: str) -> bool:
+        """True when an Auth user exists for ``email`` (service-role
+        Admin API lookup — server-only, never client-visible).
+
+        GoTrue's Admin API has no get-by-email: this pages
+        ``GET /auth/v1/admin/users`` (1000/page, at most
+        ``_ADMIN_USER_LOOKUP_MAX_PAGES`` pages) and compares
+        emails case-insensitively. Soft-deleted users are not
+        listed by GoTrue, which is the correct answer here — a
+        deleted user cannot sign in (no bcrypt runs for them), so
+        the dummy must run. Any transport/upstream error returns
+        False (run the dummy — the timing cover stays on) and is
+        logged; the caller still answers the generic 401.
+        """
+        self._require_configured()
+        url = (self._settings.supabase_url or "").rstrip("/") + "/auth/v1/admin/users"
+        service_key = self._settings.supabase_service_role_key
+        key = service_key.get_secret_value() if service_key is not None else ""
+        wanted = email.strip().lower()
+        try:
+            with proxy_safe_httpx_client(timeout=5.0) as client:
+                for page in range(1, _ADMIN_USER_LOOKUP_MAX_PAGES + 1):
+                    response = client.get(
+                        url,
+                        params={"page": page, "per_page": _ADMIN_USER_LOOKUP_PAGE_SIZE},
+                        headers={
+                            "apikey": key,
+                            "Authorization": f"Bearer {key}",
+                        },
+                    )
+                    if response.status_code >= 400:
+                        logger.warning(
+                            "supabase admin user lookup failed",
+                            extra={"status": response.status_code},
+                        )
+                        return False
+                    users = response.json().get("users", [])
+                    for user in users:
+                        if str(user.get("email") or "").strip().lower() == wanted:
+                            return True
+                    if len(users) < _ADMIN_USER_LOOKUP_PAGE_SIZE:
+                        return False
+                # Page cap reached without finding the email: answer
+                # False (run the dummy) rather than claim absence
+                # falsely — the dummy is timing cover, not a decision.
+                logger.warning(
+                    "supabase admin user lookup hit the page cap; assuming absent",
+                    extra={"pages": _ADMIN_USER_LOOKUP_MAX_PAGES},
+                )
+                return False
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "supabase admin user lookup transport error",
+                extra={"error_type": type(exc).__name__},
+            )
+            return False
+
     def sign_out(self, access_token: str) -> None:
         """Revoke the session server-side via GoTrue ``POST /logout``.
 
@@ -270,6 +381,54 @@ class SupabaseAuthProvider:
                 return
             _log_auth_error("reset_password", exc)
             raise _bad_gateway() from exc
+
+    def disable_password(self, user_id: uuid.UUID) -> None:
+        """Invalidate the user's password via the GoTrue Admin API.
+
+        F2 fix (red-team, 20 Nov 2026): ``force_password_reset``
+        used to only SEND the reset email — the old password kept
+        working until the link was used. This replaces the password
+        with a fresh 32-byte random one (``PUT
+        /auth/v1/admin/users/{id}``, service-role key — same REST
+        pattern as :meth:`user_exists`, NOT the anon-key supabase-py
+        admin client, which cannot call Admin endpoints).
+
+        Random-password route, NOT a ban: a banned user cannot sign
+        in at all — including via the recovery link — until unbanned,
+        so a ban would break the reset flow this method exists to
+        enable. The random password is unguessable and never stored
+        or returned, so the reset link is the only way back in, and
+        the reset flow itself restores access with no extra unban
+        step. 503 when unconfigured, 502 on any upstream failure
+        (the caller must see that the password was NOT invalidated).
+        """
+        self._require_configured()
+        url = (self._settings.supabase_url or "").rstrip("/") + f"/auth/v1/admin/users/{user_id}"
+        service_key = self._settings.supabase_service_role_key
+        key = service_key.get_secret_value() if service_key is not None else ""
+        new_password = secrets.token_urlsafe(32)
+        try:
+            with proxy_safe_httpx_client(timeout=5.0) as client:
+                response = client.put(
+                    url,
+                    json={"password": new_password},
+                    headers={
+                        "apikey": key,
+                        "Authorization": f"Bearer {key}",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "supabase admin disable password transport error",
+                extra={"error_type": type(exc).__name__},
+            )
+            raise _bad_gateway() from exc
+        if response.status_code >= 400:
+            logger.warning(
+                "supabase admin disable password failed",
+                extra={"status": response.status_code},
+            )
+            raise _bad_gateway()
 
     def exchange_code(self, code: str) -> AuthSession:
         """Exchange a Supabase PKCE code (email verification / password

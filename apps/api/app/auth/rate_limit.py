@@ -35,6 +35,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("websurfacehq")
 
+# Per-account MFA / invite buckets (M2 fix, 20 Nov 2026): MFA
+# verify/confirm/step-up and invite-accept previously shared only
+# the per-IP bucket, so an attacker could spray TOTP codes against
+# one account from many IPs (and challenge_and_verify mints a fresh
+# challenge per attempt, so the IP bucket was the only brake). These
+# buckets are keyed by user id (or invite-token hash) with their own
+# limits — 5 attempts / 15 min, the same shape as the login limit —
+# and apply IN ADDITION to the per-IP bucket.
+MFA_MAX_ATTEMPTS = 5
+MFA_WINDOW_SECONDS = 900
+INVITE_ACCEPT_MAX_ATTEMPTS = 5
+INVITE_ACCEPT_WINDOW_SECONDS = 900
+
 
 class RateLimiter:
     """Fixed-window limiter: ``max_attempts`` per ``window_seconds``."""
@@ -60,16 +73,29 @@ class RateLimiter:
     def check(self, key: str) -> tuple[bool, int]:
         """Return ``(allowed, retry_after_seconds)`` for ``key``."""
         if self._redis is not None:
-            return self._check_redis(key)
-        return self._check_memory(key)
+            return self._check_redis(key, self._max_attempts, self._window_seconds)
+        return self._check_memory(key, self._max_attempts, self._window_seconds)
 
-    def _check_memory(self, key: str) -> tuple[bool, int]:
+    def check_account(
+        self, key: str, *, max_attempts: int, window_seconds: int
+    ) -> tuple[bool, int]:
+        """Per-account (or per-invite-token) bucket with EXPLICIT
+        limits — independent of this instance's login defaults, so a
+        test limiter constructed with huge login limits cannot
+        accidentally disable the MFA buckets. Same backends as
+        :meth:`check` (Redis when configured, in-memory fallback);
+        same fail-open-on-Redis-outage rule."""
+        if self._redis is not None:
+            return self._check_redis(key, max_attempts, window_seconds)
+        return self._check_memory(key, max_attempts, window_seconds)
+
+    def _check_memory(self, key: str, max_attempts: int, window_seconds: int) -> tuple[bool, int]:
         now = time.monotonic()
-        window_start = now - self._window_seconds
+        window_start = now - window_seconds
         with self._lock:
             attempts = [t for t in self._attempts.get(key, []) if t > window_start]
-            if len(attempts) >= self._max_attempts:
-                retry_after = math.ceil(self._window_seconds - (now - attempts[0]))
+            if len(attempts) >= max_attempts:
+                retry_after = math.ceil(window_seconds - (now - attempts[0]))
                 self._attempts[key] = attempts
                 return False, max(retry_after, 1)
             attempts.append(now)
@@ -84,19 +110,19 @@ class RateLimiter:
                 }
             return True, 0
 
-    def _check_redis(self, key: str) -> tuple[bool, int]:
+    def _check_redis(self, key: str, max_attempts: int, window_seconds: int) -> tuple[bool, int]:
         assert self._redis is not None  # noqa: S101 - guarded by check()
         try:
             pipe: Pipeline = self._redis.pipeline()
             pipe.incr(key)
             # Set the TTL only when the key is new (NX): the window is
             # fixed from the first attempt, not sliding.
-            pipe.expire(key, self._window_seconds, nx=True)
+            pipe.expire(key, window_seconds, nx=True)
             pipe.ttl(key)
             results: list[Any] = pipe.execute()  # type: ignore[no-untyped-call]
             count = int(results[0])
             ttl = int(results[2])
-            if count > self._max_attempts:
+            if count > max_attempts:
                 return False, max(ttl, 1)
             return True, 0
         except redis.RedisError:

@@ -232,6 +232,14 @@ def verify_token(token: str, *, jwks: dict[str, dict[str, Any]] | None = None) -
             token,
             key,
             algorithms=["ES256"],
+            # leeway=5 (Week 1 open item 3): tokens whose ``iat`` is a
+            # few seconds ahead of this VM's clock must still verify —
+            # clock skew between the Supabase issuer and the API host
+            # is real (a token minted "now" can carry an ``iat`` up to
+            # a few seconds in our future). 5 s is small enough that
+            # it cannot extend a token's life meaningfully (``exp``
+            # gets the same 5 s grace; Supabase tokens live 3600 s).
+            leeway=5,
             # verify_aud is False here because PyJWT raises when the token
             # carries an aud claim but no expected audience is passed; the
             # audience is checked manually below ("authenticated").

@@ -33,11 +33,15 @@ from app.core.config import Settings, settings
 from app.core.errors import ApiError
 from app.db.store import (
     AuditLog,
+    DuplicateOwnerAccountError,
+    DuplicateStaffAccountError,
     DuplicateTargetError,
     Finding,
     Scan,
     ScanConflictError,
     ScanJob,
+    StaffAccountRow,
+    StaffInviteRow,
     Subscription,
     Target,
     TargetCapError,
@@ -170,6 +174,39 @@ class SupabaseStore:
             action=str(row["action"]),
             target_domain=row.get("target_domain"),
             metadata=dict(row.get("metadata") or {}),
+            created_at=_parse_dt(row.get("created_at")),
+        )
+
+    @staticmethod
+    def _staff_account(row: dict[str, Any]) -> StaffAccountRow:
+        # Migration 0007 has NO mfa_enrolled column: enrollment is
+        # derived from the stored verified factor id (a row with a
+        # current factor is enrolled; clearing it un-enrolls). The
+        # in-memory row carries the flag as a cache; the Supabase
+        # row derives it, so the two can never disagree.
+        return StaffAccountRow(
+            user_id=UUID(str(row["user_id"])),
+            email=str(row["email"]),
+            role=str(row["role"]),
+            status=str(row.get("status", "active")),
+            invited_by=UUID(str(row["invited_by"])) if row.get("invited_by") else None,
+            created_at=_parse_dt(row.get("created_at")),
+            updated_at=_parse_dt(row.get("updated_at")),
+            mfa_enrolled=row.get("current_factor_id") is not None,
+            current_factor_id=row.get("current_factor_id"),
+            pending_factor_id=row.get("pending_factor_id"),
+        )
+
+    @staticmethod
+    def _staff_invite(row: dict[str, Any]) -> StaffInviteRow:
+        return StaffInviteRow(
+            id=UUID(str(row["id"])),
+            token_hash=str(row["token_hash"]),
+            email=str(row["email"]),
+            role=str(row["role"]),
+            invited_by=UUID(str(row["invited_by"])),
+            expires_at=_parse_dt(row.get("expires_at")) or _now(),
+            used_at=_parse_dt(row.get("used_at")),
             created_at=_parse_dt(row.get("created_at")),
         )
 
@@ -714,6 +751,360 @@ class SupabaseStore:
         if not rows:
             raise ApiError(500, "INTERNAL_ERROR", "Failed to write audit log")
         return self._audit(dict(rows[0]))
+
+    def list_audit_logs(
+        self,
+        *,
+        actor_id: UUID | None = None,
+        action: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        search: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[AuditLog], str | None]:
+        # NO user_id scoping: audit rows span all tenants and this
+        # method is staff-only — the caller MUST gate it with
+        # can(user, "admin.audit.read", platform_role=...) first.
+        # Same keyset convention as _page (created_at + id, newest
+        # first); the Python-side tiebreak closes the same-timestamp
+        # boundary the SQL lte leaves open.
+        query = (
+            self._client.table("audit_logs")
+            .select("*")
+            .order("created_at", desc=True)
+            .order("id", desc=True)
+        )
+        if actor_id is not None:
+            query = query.eq("user_id", str(actor_id))
+        if action is not None:
+            query = query.eq("action", action)
+        if since is not None:
+            query = query.gte("created_at", since.isoformat())
+        if until is not None:
+            query = query.lte("created_at", until.isoformat())
+        if search:
+            # PostgREST or_ splits on commas, so a comma in the term
+            # would misparse the filter; % is a wildcard. Both are
+            # stripped (documented limitation — the in-memory
+            # implementation matches the raw substring instead).
+            term = search.replace(",", "").replace("%", "")
+            if term:
+                query = query.or_(f"action.ilike.%{term}%,target_domain.ilike.%{term}%")
+        if cursor is not None:
+            cursor_created_at, _ = decode_cursor(cursor)
+            query = query.lte("created_at", cursor_created_at.isoformat())
+        response = query.limit(limit + 1).execute()
+        rows: list[dict[str, Any]] = [dict(r) for r in (response.data or [])]
+        if cursor is not None:
+            cursor_created_at, cursor_id = decode_cursor(cursor)
+            rows = [
+                r
+                for r in rows
+                if (
+                    _parse_dt(r.get("created_at")) or _now(),
+                    UUID(str(r["id"])),
+                )
+                < (cursor_created_at, cursor_id)
+            ]
+        mapped = [self._audit(r) for r in rows]
+        return mapped[:limit], self._next_cursor(mapped, limit)
+
+    def get_staff_role(self, user_id: UUID) -> tuple[str, str] | None:
+        # Service-role read of staff_roles (RLS gives authenticated
+        # nothing on this table by design — the role is never trusted
+        # from the client). No row means "not staff".
+        response = (
+            self._client.table("staff_roles")
+            .select("role,status")
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return (str(rows[0]["role"]), str(rows[0]["status"]))
+
+    # -- staff accounts (admin foundation, C2 fix) ----------------------
+    # The DB is the source of truth. Unique violations surface as
+    # PostgREST errors; the constraint/index name in the message is
+    # the mapping key (same caveat as create_target's cap mapping —
+    # unproven against live Supabase until the integration pass;
+    # a mis-map fails closed as a 500, never as a wrong 200).
+    def create_staff_account(
+        self,
+        user_id: UUID,
+        email: str,
+        role: str,
+        invited_by: UUID | None,
+        created_at: datetime | None = None,
+    ) -> StaffAccountRow:
+        normalized = email.strip().lower()
+        now = created_at or _now()
+        try:
+            response = (
+                self._client.table("staff_roles")
+                .insert(
+                    {
+                        "user_id": str(user_id),
+                        "email": normalized,
+                        "role": role,
+                        "status": "active",
+                        "invited_by": str(invited_by) if invited_by is not None else None,
+                        "created_at": now.isoformat(),
+                        "updated_at": now.isoformat(),
+                    }
+                )
+                .execute()
+            )
+        except Exception as exc:
+            # Second-Owner backstops (trigger message, then the
+            # partial unique index) — checked FIRST: a duplicate
+            # email for an "owner@..." address must not misclassify
+            # as a second Owner.
+            if "only one Owner" in str(exc) or "staff_roles_single_owner_idx" in str(exc):
+                raise DuplicateOwnerAccountError("An Owner account already exists") from exc
+            if "duplicate" in str(exc).lower() or "23505" in str(exc):
+                raise DuplicateStaffAccountError(
+                    f"Staff account already exists for {normalized}"
+                ) from exc
+            raise
+        rows = response.data or []
+        if not rows:
+            raise ApiError(500, "INTERNAL_ERROR", "Failed to create staff account")
+        return self._staff_account(dict(rows[0]))
+
+    def get_staff_account(self, user_id: UUID) -> StaffAccountRow | None:
+        response = (
+            self._client.table("staff_roles")
+            .select("*")
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_account(dict(rows[0]))
+
+    def get_staff_account_by_email(self, email: str) -> StaffAccountRow | None:
+        response = (
+            self._client.table("staff_roles")
+            .select("*")
+            .eq("email", email.strip().lower())
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_account(dict(rows[0]))
+
+    def list_staff_accounts(self) -> list[StaffAccountRow]:
+        response = self._client.table("staff_roles").select("*").order("created_at").execute()
+        return [self._staff_account(dict(row)) for row in (response.data or [])]
+
+    def update_staff_account(
+        self,
+        user_id: UUID,
+        *,
+        role: str | None = None,
+        status: str | None = None,
+        mfa_enrolled: bool | None = None,
+    ) -> StaffAccountRow | None:
+        # mfa_enrolled is NOT a column (see _staff_account): it is
+        # derived from current_factor_id, so there is nothing to
+        # write for it — callers set the factor ids instead.
+        if self.get_staff_account(user_id) is None:
+            return None
+        patch: dict[str, Any] = {"updated_at": _now().isoformat()}
+        if role is not None:
+            patch["role"] = role
+        if status is not None:
+            patch["status"] = status
+        try:
+            response = (
+                self._client.table("staff_roles")
+                .update(patch)
+                .eq("user_id", str(user_id))
+                .execute()
+            )
+        except Exception as exc:
+            if "only one Owner" in str(exc) or "staff_roles_single_owner_idx" in str(exc):
+                raise DuplicateOwnerAccountError("An Owner account already exists") from exc
+            raise
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_account(dict(rows[0]))
+
+    def set_staff_factor_ids(
+        self,
+        user_id: UUID,
+        *,
+        current_factor_id: str | None,
+        pending_factor_id: str | None,
+    ) -> StaffAccountRow | None:
+        if self.get_staff_account(user_id) is None:
+            return None
+        response = (
+            self._client.table("staff_roles")
+            .update(
+                {
+                    "current_factor_id": current_factor_id,
+                    "pending_factor_id": pending_factor_id,
+                    "updated_at": _now().isoformat(),
+                }
+            )
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_account(dict(rows[0]))
+
+    def delete_staff_account(self, user_id: UUID) -> bool:
+        if self.get_staff_account(user_id) is None:
+            return False
+        self._client.table("staff_roles").delete().eq("user_id", str(user_id)).execute()
+        return True
+
+    # -- staff invites (admin foundation, C2 fix) -----------------------
+    def create_staff_invite(
+        self,
+        email: str,
+        role: str,
+        invited_by: UUID,
+        token_hash: str,
+        expires_at: datetime,
+        created_at: datetime | None = None,
+    ) -> StaffInviteRow:
+        now = created_at or _now()
+        response = (
+            self._client.table("staff_invites")
+            .insert(
+                {
+                    "id": str(uuid.uuid4()),
+                    "token_hash": token_hash,
+                    "email": email.strip().lower(),
+                    "role": role,
+                    "invited_by": str(invited_by),
+                    "expires_at": expires_at.isoformat(),
+                    "used_at": None,
+                    "created_at": now.isoformat(),
+                }
+            )
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise ApiError(500, "INTERNAL_ERROR", "Failed to create staff invite")
+        return self._staff_invite(dict(rows[0]))
+
+    def claim_staff_invite(self, token_hash: str, now: datetime) -> StaffInviteRow | None:
+        # Atomic single-use claim: one UPDATE ... WHERE used_at IS
+        # NULL AND expires_at > now RETURNING — two concurrent claims
+        # cannot both return a row.
+        response = (
+            self._client.table("staff_invites")
+            .update({"used_at": now.isoformat()})
+            .eq("token_hash", token_hash)
+            .is_("used_at", "null")
+            .gt("expires_at", now.isoformat())
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_invite(dict(rows[0]))
+
+    def get_staff_invite(self, invite_id: UUID) -> StaffInviteRow | None:
+        response = (
+            self._client.table("staff_invites")
+            .select("*")
+            .eq("id", str(invite_id))
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_invite(dict(rows[0]))
+
+    def revoke_pending_staff_invites(self, email: str, now: datetime) -> int:
+        # Same used_at reuse as the in-memory store (see the Store
+        # protocol): revoked reads as used at claim time, so the old
+        # token 404s; the audit row records the revocation.
+        response = (
+            self._client.table("staff_invites")
+            .update({"used_at": now.isoformat()})
+            .eq("email", email.strip().lower())
+            .is_("used_at", "null")
+            .gt("expires_at", now.isoformat())
+            .execute()
+        )
+        return len(response.data or [])
+
+    def revoke_staff_invite(self, invite_id: UUID, now: datetime) -> StaffInviteRow | None:
+        response = (
+            self._client.table("staff_invites")
+            .update({"used_at": now.isoformat()})
+            .eq("id", str(invite_id))
+            .is_("used_at", "null")
+            .gt("expires_at", now.isoformat())
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._staff_invite(dict(rows[0]))
+
+    # -- admin settings (admin foundation, C3 fix) ----------------------
+    def get_admin_setting(self, key: str) -> str | None:
+        response = (
+            self._client.table("admin_settings").select("value").eq("key", key).limit(1).execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        value = rows[0].get("value")
+        return str(value) if value is not None else None
+
+    def set_admin_setting(self, key: str, value: str) -> str:
+        payload: dict[str, Any] = {
+            "key": key,
+            "value": value,
+            "updated_at": _now().isoformat(),
+        }
+        response = self._client.table("admin_settings").upsert(payload, on_conflict="key").execute()
+        rows = response.data or []
+        if not rows:
+            raise ApiError(500, "INTERNAL_ERROR", "Failed to write admin setting")
+        stored = rows[0].get("value")
+        return str(stored) if stored is not None else value
+
+    def get_prefix_version(self) -> int:
+        value = self.get_admin_setting("prefix_version")
+        if value is None:
+            return 1
+        try:
+            return max(int(value), 1)
+        except ValueError:
+            return 1
+
+    def set_prefix_version(self, version: int) -> int:
+        self.set_admin_setting("prefix_version", str(max(version, 1)))
+        return self.get_prefix_version()
+
+    def bump_prefix_version(self) -> int:
+        # Read-modify-write (no single-statement increment through
+        # the PostgREST query builder): a lost race between two
+        # rotations bumps once instead of twice — fail-safe, since a
+        # rotation's session invalidation depends on the version
+        # CHANGING, not on its exact value. Residual noted in ADR.
+        return self.set_prefix_version(self.get_prefix_version() + 1)
 
     def get_owner(self, resource_kind: str, resource_id: UUID) -> UUID | None:
         # Audit-only: service_role sees all rows, so this answers "whose
