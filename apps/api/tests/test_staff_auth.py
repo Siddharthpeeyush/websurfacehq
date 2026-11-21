@@ -175,7 +175,17 @@ def staff_client() -> Generator[
     mfa_service = MfaService(backend=fake_mfa)
     set_auth_provider(fake_auth)
     set_mfa_service(mfa_service)
-    clock = FakeClock()
+    # The FakeClock must start at (approximately) the real wall-clock
+    # time, NOT the frozen START default: SessionManager.issue() stamps
+    # issued_at from this clock, but the router computes expires_in
+    # from the REAL wall clock (staff_auth._now() /
+    # _build_session_response). With the frozen 2026-11-20 start the
+    # 12h absolute expiry passed on 2026-11-21 00:00 UTC, so the
+    # remaining time clamps to 0 and the expires_in assertion fails on
+    # every run since. Starting at real now keeps remaining ~= 43200
+    # forever. Boundary tests advance this clock relatively, so they
+    # are unaffected by the start value.
+    clock = FakeClock(datetime.now(timezone.utc))
     manager = SessionManager(
         InMemoryStaffSessionStore(),
         absolute_hours=12,
